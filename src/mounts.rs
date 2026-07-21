@@ -21,6 +21,7 @@ impl Mount {
 
     /// `-v /path:/path[:ro]` — same path inside and out, so absolute paths baked into
     /// build artifacts (compile_commands.json, ccache, diagnostics) stay valid both sides.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn to_arg(&self) -> String {
         let p = self.host.display();
         if self.read_only {

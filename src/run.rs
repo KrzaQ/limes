@@ -1,24 +1,40 @@
-//! The default action: assemble and exec `docker run` for a sandbox.
+//! The default action: assemble and exec a sandbox.
+//!
+//! Two backends. On Linux that means `docker run` against the dedicated rootless daemon,
+//! with the host userland mirrored in. On macOS it means `sandbox-exec` with a generated
+//! SBPL profile — no container, because the process is already on the host and there is
+//! nothing to mirror (see `MACOS-BACKEND.md`).
+//!
+//! **The mount table is shared.** Both backends consume the same deduped, depth-sorted
+//! `Vec<Mount>` produced by the same precedence chain; only the final translation differs
+//! — `-v` args on one side, SBPL rules on the other.
 
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+#[cfg(target_os = "linux")]
+use anyhow::bail;
 
 use crate::RunArgs;
 use crate::agents;
 use crate::config;
-use crate::context::{Context, IMAGE_TAG, LABEL};
-use crate::docker;
-use crate::forward::{self, Forwards};
+use crate::context::Context;
 use crate::mounts::{self, Mount};
 
-/// Assemble the mount table.
+#[cfg(target_os = "linux")]
+use crate::context::{IMAGE_TAG, LABEL};
+#[cfg(target_os = "linux")]
+use crate::docker;
+#[cfg(target_os = "linux")]
+use crate::forward::{self, Forwards};
+
+/// Assemble the mount table: the shared half of both backends.
 ///
 /// Order is least-to-most explicit; `dedupe` then collapses exact-path collisions with
-/// last-wins, and `sort_for_nesting` orders parent-before-child. `extra` is whatever the
-/// caller detected (agents, rosa) and slots in after the built-in defaults, so config and
-/// the CLI still override it.
+/// last-wins, and `sort_for_nesting` orders parent-before-child. That ordering is what
+/// makes nesting work on *both* backends — Docker layers the binds, Seatbelt takes the
+/// last matching rule.
 fn assemble_mounts(
     ctx: &Context,
     args: &RunArgs,
@@ -53,6 +69,7 @@ fn assemble_mounts(
     Ok((mounts, symlinks))
 }
 
+#[cfg(target_os = "linux")]
 pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -143,10 +160,60 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     docker::run(cmd)
 }
 
+/// The macOS backend: generate an SBPL profile and hand it to `sandbox-exec`.
+///
+/// Notice how much is *absent* versus the Linux path — no image, no daemon preflight, no
+/// uid/gid translation, no credential forwarding, no symlink prelude. All of it existed to
+/// reconstruct the host inside a container; here the process is the host already. What is
+/// left is the mount table and a write policy.
+#[cfg(target_os = "macos")]
+pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let workspace = std::env::current_dir()?;
+    let cfg = if args.no_config { None } else { config::load(ctx)? };
+
+    // Agents still matter, but only for their *state* dirs: the program files are already
+    // on the host and readable, while `~/.claude` must be writable under the base deny.
+    let detected = agents::detect(ctx, args);
+    let (mounts, _symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, detected.mounts.clone())?;
+
+    // Seatbelt matches resolved paths, so the temp dir must be canonical
+    // (`/private/var/folders/…`); `canonicalize` is realpath.
+    let tmpdir = std::env::temp_dir();
+    let tmpdir = tmpdir.canonicalize().unwrap_or(tmpdir);
+    let profile = crate::seatbelt::profile(&mounts, &tmpdir);
+
+    let inner: Vec<String> = if args.cmd.is_empty() {
+        vec!["zsh".into(), "-l".into()]
+    } else {
+        args.cmd.clone()
+    };
+
+    // `-p` takes the profile inline, so there is no temp file to write, secure, or clean
+    // up after exec.
+    let mut cmd = Command::new("sandbox-exec");
+    cmd.arg("-p").arg(&profile).args(&inner);
+
+    if args.dry_run {
+        println!("{profile}");
+        let quoted: Vec<String> = inner.iter().map(|a| shell_quote(a)).collect();
+        println!("\n# sandbox-exec -p '<the profile above>' {}", quoted.join(" "));
+        return Ok(());
+    }
+
+    if !detected.names.is_empty() {
+        eprintln!("limes: agents available: {}", detected.names.join(", "));
+    }
+    // exec() only returns if it fails to replace the process.
+    Err(cmd.exec().into())
+}
+
 /// Host-userland mirror + the `/etc` handful + non-shell credential/state files. Shell
 /// rc files are deliberately not here — they arrive via the dotfiles `config.d` drop-in,
 /// which recreates their symlinks so self-locating config resolves correctly. This keeps
 /// limes free of shell-specific knowledge.
+#[cfg(target_os = "linux")]
 fn default_mounts(ctx: &Context) -> Vec<Mount> {
     let mut m = Vec::new();
 
@@ -181,7 +248,22 @@ fn default_mounts(ctx: &Context) -> Vec<Mount> {
     m
 }
 
+/// macOS needs almost none of the Linux default mounts: `/usr` and the `/etc` handful are
+/// the host's own and already readable, and reads are unrestricted under Murphy anyway.
+/// What survives is the one entry that must be *writable* — Claude Code's state dir, which
+/// it rewrites on auth-token refresh.
+#[cfg(target_os = "macos")]
+fn default_mounts(ctx: &Context) -> Vec<Mount> {
+    let mut m = Vec::new();
+    let claude = ctx.home.join(".claude");
+    if claude.exists() {
+        m.push(Mount::rw(claude));
+    }
+    m
+}
+
 /// Verify the daemon is up and the image is built before running.
+#[cfg(target_os = "linux")]
 fn preflight(ctx: &Context) -> Result<()> {
     if !docker::daemon_alive(ctx) {
         bail!(
@@ -210,6 +292,7 @@ fn dedupe(mounts: &mut Vec<Mount>) {
     *mounts = out;
 }
 
+#[cfg(target_os = "linux")]
 fn derive_name(workspace: &Path) -> String {
     let base = workspace
         .file_name()
@@ -222,16 +305,19 @@ fn derive_name(workspace: &Path) -> String {
     format!("limes-{}", sanitized.trim_matches('-'))
 }
 
+#[cfg(target_os = "linux")]
 fn cmd_label(args: &RunArgs) -> String {
     if args.cmd.is_empty() { "zsh".into() } else { args.cmd.join(" ") }
 }
 
+#[cfg(target_os = "linux")]
 fn path_str(p: &Path) -> String {
     p.display().to_string()
 }
 
 /// A `sh` script that recreates each symlink in the (writable tmpfs) home, then execs the
 /// real command passed as positional parameters (`sh -c '…' limes <cmd…>` → `"$@"`).
+#[cfg(target_os = "linux")]
 fn symlink_prelude(symlinks: &[config::SymlinkSpec]) -> String {
     let mut s = String::new();
     for sl in symlinks {
@@ -249,6 +335,7 @@ fn symlink_prelude(symlinks: &[config::SymlinkSpec]) -> String {
 }
 
 /// Render a Command as a copy-pasteable shell line for `--dry-run`.
+#[cfg(target_os = "linux")]
 fn render(cmd: &Command) -> String {
     let mut parts = vec![cmd.get_program().to_string_lossy().to_string()];
     for a in cmd.get_args() {
@@ -282,6 +369,7 @@ mod tests {
         assert_eq!(m[1], Mount::ro("/b".into()));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn derive_name_sanitizes_workspace() {
         assert_eq!(derive_name(Path::new("/home/u/my.proj")), "limes-my-proj");

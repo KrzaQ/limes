@@ -57,6 +57,25 @@ These are load-bearing; breaking one silently defeats the tool.
 - **A mount path that doesn't exist on the host is a hard error**, not a silently-created
   empty dir. The only exception is config's `optional = true`.
 
+## Two backends
+
+Linux runs `docker run` against the dedicated rootless daemon. macOS (experimental) runs
+`sandbox-exec` with a generated SBPL profile — there is no container, because the process is
+already on the host and there is nothing to mirror. `MACOS-BACKEND.md` is the design record
+and includes the measured Seatbelt semantics; read it before touching `seatbelt.rs`.
+
+**The mount table is the shared half.** Both backends consume the same deduped, depth-sorted
+`Vec<Mount>` from `assemble_mounts` in `run.rs`; only the final translation differs (`-v`
+args vs SBPL rules). Depth-sorting is load-bearing on both — Docker layers the binds, and
+Seatbelt takes the *last matching rule*, so shallowest-first puts the specific rule where it
+wins. That correspondence is why the precedence engine ports unchanged; don't break it.
+
+Platform gating convention: `bootstrap`/`docker`/`passthrough`/`status` are
+`#[cfg(target_os = "linux")]` modules. `seatbelt` and `forward` compile everywhere with
+`cfg_attr(…, allow(dead_code))`, so their pure logic stays unit-testable in a Linux dev loop.
+The clap surface is deliberately identical on both platforms — the container subcommands
+`bail!` on macOS naming themselves Linux-only rather than silently succeeding.
+
 ## Architecture
 
 `main.rs` is pure clap wiring: it builds a `Context` and dispatches to one module per

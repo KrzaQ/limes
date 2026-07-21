@@ -115,7 +115,9 @@ impl MountSpec {
 
 /// A symlink to (re)create inside the sandbox, mirroring the host.
 pub struct SymlinkSpec {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub link: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub target: PathBuf,
 }
 
@@ -173,6 +175,7 @@ fn parse_optional(path: &Path) -> Result<Option<Config>> {
 
 impl Config {
     /// The standing forward switches, for `forward::Forwards::resolve` to layer CLI over.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn forward(&self) -> Forward {
         self.forward
     }

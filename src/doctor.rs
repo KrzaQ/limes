@@ -8,7 +8,10 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::context::{Context, IMAGE_TAG, SERVICE};
+use crate::context::Context;
+#[cfg(target_os = "linux")]
+use crate::context::{IMAGE_TAG, SERVICE};
+#[cfg(target_os = "linux")]
 use crate::docker;
 use crate::forward;
 use crate::util::find_in_path;
@@ -50,6 +53,7 @@ impl Report {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn doctor(ctx: &Context) -> Result<()> {
     let mut r = Report::new();
 
@@ -148,21 +152,109 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     Ok(())
 }
 
+/// macOS has no daemon, no image and no prerequisites — roughly half the Linux report
+/// evaporates rather than porting. What replaces it is a statement of what this platform
+/// does *not* enforce: the design notes are explicit that omitting a check must never read
+/// as passing it.
+#[cfg(target_os = "macos")]
+pub fn doctor(ctx: &Context) -> Result<()> {
+    let mut r = Report::new();
+
+    match find_in_path("sandbox-exec") {
+        Some(p) => r.add(Health::Ok, "sandbox-exec", p.display().to_string()),
+        None => r.add(Health::Fail, "sandbox-exec", "not found — the backend cannot run"),
+    }
+    // Seatbelt matches resolved paths, so a temp dir that is a symlink would silently
+    // produce rules that never fire.
+    let tmp = std::env::temp_dir();
+    match tmp.canonicalize() {
+        Ok(c) if c == tmp => r.add(Health::Ok, "tmpdir", c.display().to_string()),
+        Ok(c) => r.add(Health::Ok, "tmpdir", format!("{} (resolved from {})", c.display(), tmp.display())),
+        Err(e) => r.add(Health::Fail, "tmpdir", format!("cannot resolve {}: {e}", tmp.display())),
+    }
+    // A generated profile is worth proving loadable before a real run needs it.
+    match probe_profile() {
+        Ok(()) => r.add(Health::Ok, "profile", "generated profile loads and confines writes"),
+        Err(e) => r.add(Health::Fail, "profile", e.to_string()),
+    }
+
+    let sock = forward::rosa_socket(ctx).display().to_string();
+    let (health, detail) = match (Path::new(&sock).exists(), find_in_path("rosa")) {
+        (true, Some(bin)) => (Health::Ok, format!("{sock} (client {})", bin.display())),
+        (true, None) => (Health::Warn, format!("{sock} present, but no `rosa` on PATH")),
+        (false, Some(_)) => (Health::Warn, format!("no socket at {sock}; is `rosa serve` up?")),
+        (false, None) => (Health::Warn, "not installed (optional secret broker)".into()),
+    };
+    r.add(health, "rosa", detail);
+
+    println!("limes doctor (macOS / Seatbelt backend):");
+    r.print();
+
+    // Stated, not omitted. Each of these is a guarantee the Linux backend gives and this
+    // one does not; a reader comparing the two reports must not have to infer it.
+    println!("\nNot enforced on this platform:");
+    for line in [
+        "process isolation  — no PID namespace; `ps` sees the whole host",
+        "network isolation  — no netns; network filtering is an explicit non-goal",
+        "read confinement   — reads are unrestricted; only writes are bounded",
+        "container lifecycle— no objects to list, stop or prune (those subcommands are Linux-only)",
+    ] {
+        println!("  · {line}");
+    }
+    println!("\nEnforced: write confinement, inherited by every descendant process and");
+    println!("not escapable by re-invoking sandbox-exec.");
+
+    if r.any_fail() {
+        println!("\nSome checks failed.");
+    }
+    Ok(())
+}
+
+/// Load a minimal generated profile and confirm it actually denies a write. Catches an
+/// unloadable profile (a syntax slip in the generator) before a real run hits it.
+#[cfg(target_os = "macos")]
+fn probe_profile() -> Result<()> {
+    use crate::mounts::Mount;
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.canonicalize().unwrap_or(tmp);
+    let profile = crate::seatbelt::profile(&[Mount::ro("/".into())], &tmp);
+    let target = tmp.join("limes-doctor-probe");
+    let _ = std::fs::remove_file(&target);
+    let out = Command::new("sandbox-exec")
+        .arg("-p").arg(&profile)
+        .arg("/usr/bin/touch").arg(&target)
+        .output()?;
+    if target.exists() {
+        let _ = std::fs::remove_file(&target);
+        anyhow::bail!("profile loaded but did NOT confine writes");
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("failed to parse") || err.contains("sandbox_compile") {
+        anyhow::bail!("generated profile does not compile: {}", err.trim());
+    }
+    Ok(())
+}
+
+
+#[cfg(target_os = "linux")]
 fn username() -> String {
     std::env::var("USER").unwrap_or_else(|_| "unknown".into())
 }
 
+#[cfg(target_os = "linux")]
 fn file_has_prefix(file: &str, prefix: &str) -> bool {
     std::fs::read_to_string(file)
         .map(|s| s.lines().any(|l| l.starts_with(prefix)))
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn read_sysctl(rel: &str) -> Option<String> {
     let p = Path::new("/proc/sys").join(rel);
     std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn systemctl_active(unit: &str) -> bool {
     Command::new("systemctl")
         .args(["--user", "is-active", unit])
@@ -171,6 +263,7 @@ fn systemctl_active(unit: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn linger_enabled(user: &str) -> bool {
     // Authoritative marker file; avoids parsing loginctl output.
     Path::new("/var/lib/systemd/linger").join(user).exists()

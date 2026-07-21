@@ -5,21 +5,38 @@
 //! rootless Docker daemon. See `README.md` for the design and threat model.
 
 mod agents;
-mod bootstrap;
 mod config;
 mod context;
 mod doctor;
-mod docker;
-mod forward;
 mod mounts;
-mod passthrough;
 mod run;
-mod status;
 mod util;
+
+// The container backend. On macOS there is no daemon, no image and no container object,
+// so these have nothing to manage — see `MACOS-BACKEND.md`.
+#[cfg(target_os = "linux")]
+mod bootstrap;
+#[cfg(target_os = "linux")]
+mod docker;
+#[cfg(target_os = "linux")]
+mod passthrough;
+#[cfg(target_os = "linux")]
+mod status;
+
+// The Seatbelt backend. Compiled everywhere on purpose: profile generation is pure string
+// work, so keeping it off the cfg gate means its tests run in the Linux dev loop too.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod seatbelt;
+
+// Forward resolution is shared; only the docker `-v` emission is Linux-shaped.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod forward;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
+#[cfg(not(target_os = "linux"))]
+use anyhow::bail;
 use clap::{Args, Parser, Subcommand};
 
 use context::Context;
@@ -84,6 +101,25 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
+}
+
+impl Commands {
+    /// Subcommand name, for the Linux-only diagnostic on other platforms.
+    #[cfg(not(target_os = "linux"))]
+    fn name(&self) -> &'static str {
+        match self {
+            Commands::Run(_) => "run",
+            Commands::Bootstrap(_) => "bootstrap",
+            Commands::Doctor => "doctor",
+            Commands::Status => "status",
+            Commands::Docker { .. } => "docker",
+            Commands::Compose { .. } => "compose",
+            Commands::Exec { .. } => "exec",
+            Commands::Stop { .. } => "stop",
+            Commands::Prune { .. } => "prune",
+            Commands::Build { .. } => "build",
+        }
+    }
 }
 
 #[derive(Args, Clone)]
@@ -162,14 +198,36 @@ fn main() -> Result<()> {
     match cli.command {
         None => run::run(&ctx, &cli.run),
         Some(Commands::Run(args)) => run::run(&ctx, &args),
-        Some(Commands::Bootstrap(args)) => bootstrap::bootstrap(&ctx, &args),
         Some(Commands::Doctor) => doctor::doctor(&ctx),
+
+        #[cfg(target_os = "linux")]
+        Some(Commands::Bootstrap(args)) => bootstrap::bootstrap(&ctx, &args),
+        #[cfg(target_os = "linux")]
         Some(Commands::Status) => status::status(&ctx),
+        #[cfg(target_os = "linux")]
         Some(Commands::Docker { args }) => passthrough::docker(&ctx, &args),
+        #[cfg(target_os = "linux")]
         Some(Commands::Compose { args }) => passthrough::compose(&ctx, &args),
+        #[cfg(target_os = "linux")]
         Some(Commands::Exec { instance, cmd }) => passthrough::exec(&ctx, &instance, &cmd),
+        #[cfg(target_os = "linux")]
         Some(Commands::Stop { all, instances }) => passthrough::stop(&ctx, all, &instances),
+        #[cfg(target_os = "linux")]
         Some(Commands::Prune { force }) => passthrough::prune(&ctx, force),
+        #[cfg(target_os = "linux")]
         Some(Commands::Build { no_cache }) => bootstrap::build(&ctx, no_cache),
+
+        // The CLI surface stays identical across platforms so `--help` and the docs don't
+        // fork, but these subcommands manage Docker objects and a rootless daemon, neither
+        // of which exists under Seatbelt. Failing loudly is the point: the design notes
+        // specifically warn against letting `lim status` silently return nothing here.
+        #[cfg(not(target_os = "linux"))]
+        Some(other) => bail!(
+            "`lim {}` is Linux-only — the macOS backend is Seatbelt, not containers, so there \
+             is no daemon, image or container object to manage.\n  \
+             `lim` and `lim run` work; `lim doctor` reports what this platform does and \
+             doesn't enforce.",
+            other.name()
+        ),
     }
 }

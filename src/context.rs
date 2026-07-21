@@ -5,20 +5,25 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 
 /// Image tag built by `lim build` and run by `lim run`.
+#[cfg(target_os = "linux")]
 pub const IMAGE_TAG: &str = "limes:local";
 /// systemd user unit name for the dedicated rootless daemon.
+#[cfg(target_os = "linux")]
 pub const SERVICE: &str = "limes-docker.service";
 /// Label stamped on every container, and the filter key for `status`/`stop`/`prune`.
+#[cfg(target_os = "linux")]
 pub const LABEL: &str = "limes";
 
 /// Everything limes needs to know about the host it runs on.
 pub struct Context {
     pub uid: u32,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub gid: u32,
     pub home: PathBuf,
     pub xdg_runtime_dir: PathBuf,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl Context {
     pub fn detect() -> Result<Self> {
         // getuid/getgid never fail and need no error handling.
@@ -49,6 +54,7 @@ impl Context {
         self.home.join(".local/share/limes/docker")
     }
 
+    #[cfg(target_os = "linux")]
     pub fn service_file(&self) -> PathBuf {
         self.home.join(".config/systemd/user").join(SERVICE)
     }
