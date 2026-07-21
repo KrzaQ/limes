@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use crate::context::{Context, IMAGE_TAG, SERVICE};
 use crate::docker;
+use crate::util::find_in_path;
 
 enum Health {
     Ok,
@@ -54,8 +55,8 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     // ── Rootless prerequisites ──────────────────────────────────────
     // The vendored launcher needs these on PATH; all are in official repos.
     for bin in ["dockerd", "rootlesskit", "slirp4netns", "newuidmap", "newgidmap"] {
-        match which(bin) {
-            Some(p) => r.add(Health::Ok, bin, p),
+        match find_in_path(bin) {
+            Some(p) => r.add(Health::Ok, bin, p.display().to_string()),
             None => r.add(Health::Fail, bin, "not found — install from your distro's repos"),
         }
     }
@@ -131,14 +132,6 @@ pub fn doctor(ctx: &Context) -> Result<()> {
         println!("\nAll good.");
     }
     Ok(())
-}
-
-fn which(bin: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(bin))
-        .find(|p| p.is_file())
-        .map(|p| p.display().to_string())
 }
 
 fn username() -> String {

@@ -5,11 +5,10 @@
 //! program tree read-only and its state/auth dir read-write, so it runs authenticated
 //! inside the sandbox. We never mount `~/.local` wholesale — it may hold other creds.
 
-use std::path::{Path, PathBuf};
-
 use crate::RunArgs;
 use crate::context::Context;
 use crate::mounts::Mount;
+use crate::util::find_in_path;
 
 struct AgentSpec {
     name: &'static str,
@@ -71,19 +70,4 @@ pub fn detect(ctx: &Context, args: &RunArgs) -> Detected {
         }
     }
     Detected { mounts, names }
-}
-
-/// Locate an executable by scanning `PATH`, like `command -v`.
-fn find_in_path(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(bin))
-        .find(|cand| is_executable(cand))
-}
-
-fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    p.metadata()
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
 }

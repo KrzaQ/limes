@@ -2,7 +2,6 @@
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result, bail};
@@ -10,6 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use crate::BootstrapArgs;
 use crate::context::{Context, IMAGE_TAG, SERVICE};
 use crate::docker;
+use crate::util::find_in_path;
 
 const DOCKERFILE: &str = include_str!("../image/Dockerfile");
 /// Rootless launcher, vendored from Moby (Apache-2.0). We ship our own copy so setup
@@ -130,7 +130,7 @@ fn missing_prereqs() -> Vec<String> {
     // We vendor dockerd-rootless.sh ourselves; it needs rootlesskit + dockerd + a network
     // backend on PATH, all in official repos (no AUR / docker-ce-rootless-extras).
     for bin in ["dockerd", "rootlesskit", "slirp4netns", "newuidmap"] {
-        if which(bin).is_none() {
+        if find_in_path(bin).is_none() {
             missing.push(format!("`{bin}` not on PATH"));
         }
     }
@@ -210,13 +210,6 @@ fn wait_for_socket(ctx: &Context) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     false
-}
-
-fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(bin))
-        .find(|p| p.is_file())
 }
 
 fn indent(s: &str) -> String {
