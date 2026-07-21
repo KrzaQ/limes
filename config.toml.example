@@ -2,18 +2,31 @@
 #
 # Per-machine and hand-written: it names absolute paths that differ across machines,
 # so don't sync it (same idea as ~/.gitconfig). Not installed by anything — reference only.
+#
+# limes also reads ~/.config/limes/config.d/*.toml, merged with this file (this one wins
+# on a collision). config.d/ is for whole files owned by a tool or installer — e.g. a
+# dotfiles repo shipping its own shell rc entries — so they need no merge surgery here.
 
 [mounts]
 # The path is the key, so a path can't be listed twice. `~` and `$VAR` are expanded.
-# Every path must exist, or `lim` fails loud (like a bad --ro/--rw).
+# Every path must exist, or `lim` fails loud (like a bad --ro/--rw) — unless `optional`.
 
 # Mount your dotfiles repo read-only, so shell startup can reach repo-relative files
 # (zsh plugins, sourced helpers) that the individual config-file mounts don't cover.
 "~/code/misc/dotfiles" = "ro"
 
-# "ro" is shorthand for { mode = "ro" }. The long form is reserved for future per-path
-# options; today only `mode` is understood.
+# "ro" is shorthand for { mode = "ro" }. The long form adds optional per-path options:
 # "~/scratch" = { mode = "rw" }
+
+# `link = "parent"` — for a symlinked dotfile. docker flattens a symlink when it mounts
+# it, so config that finds siblings relative to its own resolved path (zsh locating its
+# plugins via ~/.zshrc) breaks inside. This instead recreates the symlink in the sandbox
+# and mounts its target's parent dir, so self-locating config resolves as it does here.
+# "~/.zshrc" = { mode = "ro", link = "parent" }
+
+# `optional = true` — skip silently if the path is absent, for files that exist on only
+# some of your machines.
+# "~/.zshrc.local" = { mode = "ro", optional = true }
 
 # Config mounts override the built-in defaults but lose to CLI flags: `--rw <path>` still
 # wins for a single run, and `--no-config` ignores this file entirely.
