@@ -38,4 +38,5 @@
 # [forward]
 # ssh    = true    # SSH agent socket
 # gpg    = false   # GPG extra (restricted) agent socket
+# rosa   = true    # sub rosa secret broker: socket + client binary
 # docker = false   # the limes docker socket (also drops DOCKER_HOST)

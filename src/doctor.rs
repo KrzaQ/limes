@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use crate::context::{Context, IMAGE_TAG, SERVICE};
 use crate::docker;
+use crate::forward;
 use crate::util::find_in_path;
 
 enum Health {
@@ -123,6 +124,19 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     } else {
         r.add(Health::Fail, "image", format!("{IMAGE_TAG} not built — run `lim build`"));
     }
+
+    // ── Optional forwards ───────────────────────────────────────────
+    // Never a Fail: a sandbox without rosa is fine. But a socket with no client — or a
+    // client with no socket — silently forwards nothing, and that half-state is the
+    // confusing one, so name both halves.
+    let sock = forward::rosa_socket(ctx).display().to_string();
+    let (health, detail) = match (Path::new(&sock).exists(), find_in_path("rosa")) {
+        (true, Some(bin)) => (Health::Ok, format!("{sock} (client {})", bin.display())),
+        (true, None) => (Health::Warn, format!("{sock} present, but no `rosa` on PATH")),
+        (false, Some(_)) => (Health::Warn, format!("no socket at {sock}; is `rosa serve` up?")),
+        (false, None) => (Health::Warn, "not installed (optional secret broker)".into()),
+    };
+    r.add(health, "rosa", detail);
 
     println!("limes doctor:");
     r.print();

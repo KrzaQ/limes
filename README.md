@@ -36,6 +36,11 @@ If you need to contain a hostile process, use a VM, not this.
 - **Forwards credentials, never keys**: the SSH agent socket, the GPG *extra* (restricted)
   socket, and `~/.gitconfig` — the container can *use* your keys while the agent is
   unlocked but cannot read them out.
+- **Brokers secrets through [sub rosa](https://github.com/KrzaQ/sub-rosa)**: if `rosa` is
+  on your `PATH` and its agent is running, the socket and client are mounted in, so a
+  sandboxed process can *request* a secret and you approve it on rosa's own tty — a channel
+  the sandbox cannot reach. The encrypted store lives in `$HOME`, which the tmpfs shadows,
+  so it is never readable from inside.
 - **Dedicated rootless daemon** with its own data-root, so `lim prune` can only ever
   remove limes's own containers/images/volumes — never anything on your system daemon.
 - **Sets `LIMES_VERSION`** inside the sandbox — presence tells a shell/script it's running
@@ -98,6 +103,7 @@ a flag on every run.
 [forward]
 ssh    = true    # SSH agent socket           (default: on)
 gpg    = false   # GPG extra agent socket     (default: on)
+rosa   = true    # sub rosa broker + client   (default: on)
 docker = false   # the limes docker socket    (default: on)
 ```
 

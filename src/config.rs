@@ -49,6 +49,7 @@ pub struct Config {
 pub struct Forward {
     pub ssh: Option<bool>,
     pub gpg: Option<bool>,
+    pub rosa: Option<bool>,
     pub docker: Option<bool>,
 }
 
@@ -58,6 +59,7 @@ impl Forward {
     fn merge(&mut self, other: Forward) {
         self.ssh = other.ssh.or(self.ssh);
         self.gpg = other.gpg.or(self.gpg);
+        self.rosa = other.rosa.or(self.rosa);
         self.docker = other.docker.or(self.docker);
     }
 }
@@ -243,14 +245,14 @@ mod tests {
     fn forward_defaults_to_all_unset() {
         let c = parse_str("[mounts]\n");
         assert_eq!(c.forward.gpg, None);
-        assert_eq!(c.forward.docker, None);
+        assert_eq!(c.forward.rosa, None);
     }
 
     #[test]
     fn forward_parses_booleans() {
-        let c = parse_str("[forward]\ngpg = false\ndocker = true\n");
+        let c = parse_str("[forward]\ngpg = false\nrosa = true\n");
         assert_eq!(c.forward.gpg, Some(false));
-        assert_eq!(c.forward.docker, Some(true));
+        assert_eq!(c.forward.rosa, Some(true));
         assert_eq!(c.forward.ssh, None, "unmentioned keys stay unset");
     }
 
@@ -265,10 +267,10 @@ mod tests {
     /// actually names — everything else a drop-in set must survive.
     #[test]
     fn later_file_wins_per_field() {
-        let mut f = parse_str("[forward]\ngpg = false\ndocker = false\n").forward;
+        let mut f = parse_str("[forward]\ngpg = false\nrosa = false\n").forward;
         f.merge(parse_str("[forward]\ngpg = true\n").forward);
         assert_eq!(f.gpg, Some(true), "config.toml overrides the drop-in");
-        assert_eq!(f.docker, Some(false), "untouched key survives the merge");
+        assert_eq!(f.rosa, Some(false), "untouched key survives the merge");
         assert_eq!(f.ssh, None);
     }
 }

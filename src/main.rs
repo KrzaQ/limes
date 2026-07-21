@@ -131,6 +131,12 @@ pub struct RunArgs {
     /// Do not forward the GPG agent socket
     #[arg(long = "no-gpg", overrides_with = "gpg")]
     pub no_gpg: bool,
+    /// Forward the rosa secret-broker socket and client (default)
+    #[arg(long = "rosa", overrides_with = "no_rosa")]
+    pub rosa: bool,
+    /// Do not forward the rosa secret broker
+    #[arg(long = "no-rosa", overrides_with = "rosa")]
+    pub no_rosa: bool,
     /// Forward the limes docker socket (default)
     #[arg(long = "docker", overrides_with = "no_docker")]
     pub docker: bool,

@@ -29,6 +29,9 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     // Auto-detected agents (program files ro, state dirs rw).
     let detected = agents::detect(ctx, args);
     mounts.extend(detected.mounts);
+    // rosa's socket and client binary — same-path, so they ride the normal precedence
+    // chain rather than being bolted on as raw `-v` args the way ssh/gpg have to be.
+    mounts.extend(forward::rosa_mounts(ctx, forwards.rosa));
     // Workspace is read-write by default.
     mounts.push(Mount::rw(workspace.clone()));
     // Standing defaults from config.toml + config.d/*.toml (override the implicit
