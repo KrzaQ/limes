@@ -130,9 +130,7 @@ fn add_ssh_agent(cmd: &mut Command) {
 /// Forward the GPG *extra* (restricted) socket onto the container's normal agent
 /// socket path, plus the public keyring read-only. Secret keys stay in the host agent.
 fn add_gpg_agent(cmd: &mut Command, ctx: &Context) {
-    let Ok(out) = Command::new("gpgconf")
-        .args(["--list-dir", "agent-extra-socket"])
-        .output()
+    let Ok(out) = Command::new("gpgconf").args(["--list-dir", "agent-extra-socket"]).output()
     else {
         return;
     };

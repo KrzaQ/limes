@@ -78,7 +78,9 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     // ── Kernel / security ───────────────────────────────────────────
     match read_sysctl("kernel/unprivileged_userns_clone") {
         Some(v) if v == "1" => r.add(Health::Ok, "userns", "unprivileged user namespaces enabled"),
-        Some(_) => r.add(Health::Fail, "userns", "unprivileged user namespaces disabled (sysctl=0)"),
+        Some(_) => {
+            r.add(Health::Fail, "userns", "unprivileged user namespaces disabled (sysctl=0)")
+        }
         None => r.add(Health::Ok, "userns", "no sysctl gate (enabled)"),
     }
     match read_sysctl("kernel/apparmor_restrict_unprivileged_userns") {
@@ -95,7 +97,11 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     if ctx.launcher_path().exists() {
         r.add(Health::Ok, "launcher", ctx.launcher_path().display().to_string());
     } else {
-        r.add(Health::Fail, "launcher", "vendored dockerd-rootless.sh missing — run `lim bootstrap`");
+        r.add(
+            Health::Fail,
+            "launcher",
+            "vendored dockerd-rootless.sh missing — run `lim bootstrap`",
+        );
     }
     if ctx.service_file().exists() {
         r.add(Health::Ok, "service unit", ctx.service_file().display().to_string());
@@ -109,7 +115,11 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     if linger_enabled(&user) {
         r.add(Health::Ok, "linger", format!("enabled for {user}"));
     } else {
-        r.add(Health::Warn, "linger", "disabled — daemon won't survive logout (`loginctl enable-linger`)");
+        r.add(
+            Health::Warn,
+            "linger",
+            "disabled — daemon won't survive logout (`loginctl enable-linger`)",
+        );
     }
     if ctx.socket().exists() {
         r.add(Health::Ok, "socket", ctx.socket().display().to_string());
@@ -169,7 +179,11 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     let tmp = std::env::temp_dir();
     match tmp.canonicalize() {
         Ok(c) if c == tmp => r.add(Health::Ok, "tmpdir", c.display().to_string()),
-        Ok(c) => r.add(Health::Ok, "tmpdir", format!("{} (resolved from {})", c.display(), tmp.display())),
+        Ok(c) => r.add(
+            Health::Ok,
+            "tmpdir",
+            format!("{} (resolved from {})", c.display(), tmp.display()),
+        ),
         Err(e) => r.add(Health::Fail, "tmpdir", format!("cannot resolve {}: {e}", tmp.display())),
     }
     // A generated profile is worth proving loadable before a real run needs it.
@@ -221,8 +235,10 @@ fn probe_profile() -> Result<()> {
     let target = tmp.join("limes-doctor-probe");
     let _ = std::fs::remove_file(&target);
     let out = Command::new("sandbox-exec")
-        .arg("-p").arg(&profile)
-        .arg("/usr/bin/touch").arg(&target)
+        .arg("-p")
+        .arg(&profile)
+        .arg("/usr/bin/touch")
+        .arg(&target)
         .output()?;
     if target.exists() {
         let _ = std::fs::remove_file(&target);
@@ -235,7 +251,6 @@ fn probe_profile() -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(target_os = "linux")]
 fn username() -> String {
     std::env::var("USER").unwrap_or_else(|_| "unknown".into())
@@ -243,9 +258,7 @@ fn username() -> String {
 
 #[cfg(target_os = "linux")]
 fn file_has_prefix(file: &str, prefix: &str) -> bool {
-    std::fs::read_to_string(file)
-        .map(|s| s.lines().any(|l| l.starts_with(prefix)))
-        .unwrap_or(false)
+    std::fs::read_to_string(file).map(|s| s.lines().any(|l| l.starts_with(prefix))).unwrap_or(false)
 }
 
 #[cfg(target_os = "linux")]

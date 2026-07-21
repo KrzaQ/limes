@@ -29,10 +29,7 @@ impl PsRow {
 
 pub fn status(ctx: &Context) -> Result<()> {
     if !docker::daemon_alive(ctx) {
-        bail!(
-            "limes daemon not reachable at {} — run `lim bootstrap`",
-            ctx.socket().display()
-        );
+        bail!("limes daemon not reachable at {} — run `lim bootstrap`", ctx.socket().display());
     }
 
     let out = docker::command(ctx)

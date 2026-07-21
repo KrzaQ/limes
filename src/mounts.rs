@@ -24,19 +24,14 @@ impl Mount {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn to_arg(&self) -> String {
         let p = self.host.display();
-        if self.read_only {
-            format!("{p}:{p}:ro")
-        } else {
-            format!("{p}:{p}")
-        }
+        if self.read_only { format!("{p}:{p}:ro") } else { format!("{p}:{p}") }
     }
 }
 
 /// Canonicalize a user-supplied path (realpath); errors if it does not exist,
 /// since a same-path bind mount of a missing host path is always a mistake.
 pub fn canonicalize(p: &Path) -> Result<PathBuf> {
-    p.canonicalize()
-        .with_context(|| format!("cannot mount {}: no such path on host", p.display()))
+    p.canonicalize().with_context(|| format!("cannot mount {}: no such path on host", p.display()))
 }
 
 /// Order mounts parent-before-child so nested holes apply correctly regardless of

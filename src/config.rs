@@ -165,9 +165,9 @@ fn parse(path: &Path) -> Result<Config> {
 
 fn parse_optional(path: &Path) -> Result<Option<Config>> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
-        )),
+        Ok(text) => {
+            Ok(Some(toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }

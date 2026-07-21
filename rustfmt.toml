@@ -1,0 +1,4 @@
+# Keep short calls, literals and structs on one line instead of exploding them across
+# four. This is much closer to how the codebase was written by hand, and it is what the
+# pre-commit hook enforces — see `make hooks`.
+use_small_heuristics = "Max"

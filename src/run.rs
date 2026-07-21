@@ -133,11 +133,8 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     }
 
     cmd.arg(IMAGE_TAG);
-    let inner: Vec<String> = if args.cmd.is_empty() {
-        vec!["zsh".into(), "-l".into()]
-    } else {
-        args.cmd.clone()
-    };
+    let inner: Vec<String> =
+        if args.cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { args.cmd.clone() };
     if symlinks.is_empty() {
         cmd.args(&inner);
     } else {
@@ -176,7 +173,8 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     // Agents still matter, but only for their *state* dirs: the program files are already
     // on the host and readable, while `~/.claude` must be writable under the base deny.
     let detected = agents::detect(ctx, args);
-    let (mounts, _symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, detected.mounts.clone())?;
+    let (mounts, _symlinks) =
+        assemble_mounts(ctx, args, &cfg, &workspace, detected.mounts.clone())?;
 
     // Seatbelt matches resolved paths, so the temp dir must be canonical
     // (`/private/var/folders/…`); `canonicalize` is realpath.
@@ -184,11 +182,8 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     let tmpdir = tmpdir.canonicalize().unwrap_or(tmpdir);
     let profile = crate::seatbelt::profile(&mounts, &tmpdir);
 
-    let inner: Vec<String> = if args.cmd.is_empty() {
-        vec!["zsh".into(), "-l".into()]
-    } else {
-        args.cmd.clone()
-    };
+    let inner: Vec<String> =
+        if args.cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { args.cmd.clone() };
 
     // `-p` takes the profile inline, so there is no temp file to write, secure, or clean
     // up after exec.
@@ -332,7 +327,10 @@ fn symlink_prelude(symlinks: &[config::SymlinkSpec]) -> String {
     let mut s = String::new();
     for sl in symlinks {
         if let Some(parent) = sl.link.parent() {
-            s.push_str(&format!("mkdir -p {} 2>/dev/null; ", shell_quote(&parent.display().to_string())));
+            s.push_str(&format!(
+                "mkdir -p {} 2>/dev/null; ",
+                shell_quote(&parent.display().to_string())
+            ));
         }
         s.push_str(&format!(
             "ln -sfn {} {}; ",
@@ -355,9 +353,7 @@ fn render(cmd: &Command) -> String {
 }
 
 fn shell_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_=:/.,@".contains(c))
-    {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_=:/.,@".contains(c)) {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))

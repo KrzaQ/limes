@@ -29,9 +29,7 @@ impl Context {
         // getuid/getgid never fail and need no error handling.
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is not set")?;
+        let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
         let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
