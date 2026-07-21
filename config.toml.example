@@ -1,0 +1,19 @@
+# limes config — copy to ~/.config/limes/config.toml and edit.
+#
+# Per-machine and hand-written: it names absolute paths that differ across machines,
+# so don't sync it (same idea as ~/.gitconfig). Not installed by anything — reference only.
+
+[mounts]
+# The path is the key, so a path can't be listed twice. `~` and `$VAR` are expanded.
+# Every path must exist, or `lim` fails loud (like a bad --ro/--rw).
+
+# Mount your dotfiles repo read-only, so shell startup can reach repo-relative files
+# (zsh plugins, sourced helpers) that the individual config-file mounts don't cover.
+"~/code/misc/dotfiles" = "ro"
+
+# "ro" is shorthand for { mode = "ro" }. The long form is reserved for future per-path
+# options; today only `mode` is understood.
+# "~/scratch" = { mode = "rw" }
+
+# Config mounts override the built-in defaults but lose to CLI flags: `--rw <path>` still
+# wins for a single run, and `--no-config` ignores this file entirely.

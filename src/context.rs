@@ -52,4 +52,13 @@ impl Context {
     pub fn service_file(&self) -> PathBuf {
         self.home.join(".config/systemd/user").join(SERVICE)
     }
+
+    /// Per-machine config file (standing default mounts, future settings).
+    /// Unmanaged, like `~/.gitconfig` — never symlinked from a dotfiles repo.
+    pub fn config_file(&self) -> PathBuf {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.home.join(".config"));
+        base.join("limes").join("config.toml")
+    }
 }

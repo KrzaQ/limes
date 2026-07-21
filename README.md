@@ -69,6 +69,29 @@ Auto mode inside the container relies on your host `~/.claude` settings — remo
 `permissions.disableAutoMode` and set `"defaultMode": "acceptEdits"` in
 `~/.claude/settings.json` if you want `claude --permission-mode auto` available.
 
+## Configuration
+
+Standing default mounts live in `~/.config/limes/config.toml` (honoring
+`$XDG_CONFIG_HOME`). It's **per-machine and hand-written** — not something you sync,
+since it names absolute paths that differ across machines (same idea as `~/.gitconfig`).
+
+```toml
+[mounts]
+"/storage"             = "ro"
+"~/code/misc/dotfiles" = "ro"          # so shell startup can reach repo-relative files
+"~/scratch"            = { mode = "rw" }
+```
+
+The path is the key (so a path can't be listed twice), `~` and `$VAR` are expanded, and
+`"ro"` is shorthand for `{ mode = "ro" }`. Every path must exist — a missing one is a hard
+error, just like a bad `--ro`/`--rw`. Config mounts override the built-in defaults but lose
+to CLI flags, so `--rw <path>` still wins for a single run, and `--no-config` ignores the
+file entirely. See `config.toml.example`.
+
+A common use is mounting your **dotfiles repo read-only**: limes mounts your individual
+`.zshrc`/`.zprofile` (as resolved symlinks) but not the repo they live in, so anything
+those files source by repo-relative path (zsh plugins, helpers) isn't present without it.
+
 ## Building
 
 ```

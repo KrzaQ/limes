@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 
 use crate::RunArgs;
 use crate::agents;
+use crate::config;
 use crate::context::{Context, IMAGE_TAG, LABEL};
 use crate::docker;
 use crate::mounts::{self, Mount};
@@ -24,6 +25,13 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     mounts.extend(detected.mounts);
     // Workspace is read-write by default.
     mounts.push(Mount::rw(workspace.clone()));
+    // Standing defaults from ~/.config/limes/config.toml (override the implicit
+    // conveniences above, but still lose to the explicit CLI flags below).
+    if !args.no_config {
+        if let Some(cfg) = config::load(ctx)? {
+            mounts.extend(cfg.to_mounts()?);
+        }
+    }
     // User-supplied holes (canonicalized; must exist on host). `--rw` after `--ro`
     // so a path given both ways ends up writable.
     for p in &args.ro {

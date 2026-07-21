@@ -6,6 +6,7 @@
 
 mod agents;
 mod bootstrap;
+mod config;
 mod context;
 mod doctor;
 mod docker;
@@ -109,6 +110,9 @@ pub struct RunArgs {
     /// Do not auto-detect and mount host opencode
     #[arg(long)]
     pub no_opencode: bool,
+    /// Ignore ~/.config/limes/config.toml for this run
+    #[arg(long)]
+    pub no_config: bool,
     /// Command to run in the sandbox (default: an interactive login zsh)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cmd: Vec<String>,
