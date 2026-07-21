@@ -38,6 +38,8 @@ If you need to contain a hostile process, use a VM, not this.
   unlocked but cannot read them out.
 - **Dedicated rootless daemon** with its own data-root, so `lim prune` can only ever
   remove limes's own containers/images/volumes — never anything on your system daemon.
+- **Sets `LIMES_VERSION`** inside the sandbox — presence tells a shell/script it's running
+  in limes (`[[ -n $LIMES_VERSION ]]`), and the value is the limes version.
 
 ## Usage
 

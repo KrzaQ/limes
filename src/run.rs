@@ -53,6 +53,11 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     cmd.args(["-e", &format!("HOME={}", ctx.home.display())]);
     cmd.args(["-w", &path_str(&workspace)]);
 
+    // Marker so shells/scripts/tooling inside can tell they're in a limes sandbox:
+    // presence means "inside limes", value is the version. It's the crate version, so
+    // it never drifts from Cargo.toml / `lim --version`.
+    cmd.args(["-e", concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION"))]);
+
     // Security posture: no new privileges, drop all caps, read-only rootfs, seccomp
     // left enabled. Never --privileged — the sandbox bounds reach, it doesn't grant it.
     cmd.args(["--security-opt", "no-new-privileges"]);
