@@ -195,10 +195,20 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     let mut cmd = Command::new("sandbox-exec");
     cmd.arg("-p").arg(&profile).args(&inner);
 
+    // Same marker the Linux backend passes as `-e`. `exec` inherits our environment, so
+    // without this the sandbox is invisible to anything inside it — shell prompts and
+    // scripts detect limes with `[[ -n $LIMES_VERSION ]]`, and a sandbox you cannot tell
+    // you are in is worse than no sandbox.
+    cmd.env("LIMES_VERSION", env!("CARGO_PKG_VERSION"));
+
     if args.dry_run {
         println!("{profile}");
         let quoted: Vec<String> = inner.iter().map(|a| shell_quote(a)).collect();
-        println!("\n# sandbox-exec -p '<the profile above>' {}", quoted.join(" "));
+        println!(
+            "\n# LIMES_VERSION={} sandbox-exec -p '<the profile above>' {}",
+            env!("CARGO_PKG_VERSION"),
+            quoted.join(" ")
+        );
         return Ok(());
     }
 
