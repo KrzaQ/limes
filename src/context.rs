@@ -59,12 +59,22 @@ impl Context {
         self.home.join(".local/share/limes/bin/dockerd-rootless.sh")
     }
 
+    /// `~/.config/limes` (honoring `$XDG_CONFIG_HOME`).
+    fn config_dir(&self) -> PathBuf {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.home.join(".config"))
+            .join("limes")
+    }
+
     /// Per-machine config file (standing default mounts, future settings).
     /// Unmanaged, like `~/.gitconfig` — never symlinked from a dotfiles repo.
     pub fn config_file(&self) -> PathBuf {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.home.join(".config"));
-        base.join("limes").join("config.toml")
+        self.config_dir().join("config.toml")
+    }
+
+    /// Drop-in config dir: whole `*.toml` files owned by tools/installers (e.g. dotfiles).
+    pub fn config_d_dir(&self) -> PathBuf {
+        self.config_dir().join("config.d")
     }
 }

@@ -25,11 +25,15 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     mounts.extend(detected.mounts);
     // Workspace is read-write by default.
     mounts.push(Mount::rw(workspace.clone()));
-    // Standing defaults from ~/.config/limes/config.toml (override the implicit
-    // conveniences above, but still lose to the explicit CLI flags below).
+    // Standing defaults from config.toml + config.d/*.toml (override the implicit
+    // conveniences above, but still lose to the explicit CLI flags below). `link`
+    // entries additionally produce symlinks to recreate inside the sandbox.
+    let mut symlinks: Vec<config::SymlinkSpec> = Vec::new();
     if !args.no_config {
         if let Some(cfg) = config::load(ctx)? {
-            mounts.extend(cfg.to_mounts()?);
+            let resolved = cfg.resolve()?;
+            mounts.extend(resolved.mounts);
+            symlinks = resolved.symlinks;
         }
     }
     // User-supplied holes (canonicalized; must exist on host). `--rw` after `--ro`
@@ -92,10 +96,19 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     }
 
     cmd.arg(IMAGE_TAG);
-    if args.cmd.is_empty() {
-        cmd.args(["zsh", "-l"]);
+    let inner: Vec<String> = if args.cmd.is_empty() {
+        vec!["zsh".into(), "-l".into()]
     } else {
-        cmd.args(&args.cmd);
+        args.cmd.clone()
+    };
+    if symlinks.is_empty() {
+        cmd.args(&inner);
+    } else {
+        // docker flattens symlinks on mount, so recreate the host's home symlinks in the
+        // tmpfs home before exec'ing — this is what makes self-locating config (e.g. zsh
+        // plugin paths derived from ~/.zshrc's own resolved location) work in the sandbox.
+        cmd.args(["sh", "-c", &symlink_prelude(&symlinks), "limes"]);
+        cmd.args(&inner);
     }
 
     if args.dry_run {
@@ -110,10 +123,10 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     docker::run(cmd)
 }
 
-/// Host-userland mirror + the `/etc` handful + creds that are plain read files.
-/// These use literal paths (no canonicalize): dotfiles in `$HOME` are symlinks into
-/// a repo, and we want them mounted at the `$HOME` path, letting docker resolve the
-/// symlink source itself.
+/// Host-userland mirror + the `/etc` handful + non-shell credential/state files. Shell
+/// rc files are deliberately not here — they arrive via the dotfiles `config.d` drop-in,
+/// which recreates their symlinks so self-locating config resolves correctly. This keeps
+/// limes free of shell-specific knowledge.
 fn default_mounts(ctx: &Context) -> Vec<Mount> {
     let mut m = Vec::new();
 
@@ -126,14 +139,6 @@ fn default_mounts(ctx: &Context) -> Vec<Mount> {
         let p = Path::new(p);
         if p.exists() {
             m.push(Mount::ro(p.into()));
-        }
-    }
-
-    // Shell config (symlinks into the dotfiles repo resolve host-side).
-    for rel in [".zshenv", ".zprofile", ".zprofile.local", ".zshrc", ".zshrc.local"] {
-        let p = ctx.home.join(rel);
-        if p.exists() {
-            m.push(Mount::ro(p));
         }
     }
 
@@ -249,6 +254,24 @@ fn cmd_label(args: &RunArgs) -> String {
 
 fn path_str(p: &Path) -> String {
     p.display().to_string()
+}
+
+/// A `sh` script that recreates each symlink in the (writable tmpfs) home, then execs the
+/// real command passed as positional parameters (`sh -c '…' limes <cmd…>` → `"$@"`).
+fn symlink_prelude(symlinks: &[config::SymlinkSpec]) -> String {
+    let mut s = String::new();
+    for sl in symlinks {
+        if let Some(parent) = sl.link.parent() {
+            s.push_str(&format!("mkdir -p {} 2>/dev/null; ", shell_quote(&parent.display().to_string())));
+        }
+        s.push_str(&format!(
+            "ln -sfn {} {}; ",
+            shell_quote(&sl.target.display().to_string()),
+            shell_quote(&sl.link.display().to_string()),
+        ));
+    }
+    s.push_str("exec \"$@\"");
+    s
 }
 
 /// Render a Command as a copy-pasteable shell line for `--dry-run`.

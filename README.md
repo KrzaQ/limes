@@ -83,20 +83,30 @@ since it names absolute paths that differ across machines (same idea as `~/.gitc
 
 ```toml
 [mounts]
-"/storage"             = "ro"
-"~/code/misc/dotfiles" = "ro"          # so shell startup can reach repo-relative files
-"~/scratch"            = { mode = "rw" }
+"/storage"    = "ro"                          # shorthand for { mode = "ro" }
+"~/scratch"   = { mode = "rw" }
+"~/.zshrc"    = { mode = "ro", link = "parent" }   # recreate the symlink, mount its dir
+"~/.zshrc.local" = { mode = "ro", optional = true } # skip if absent
 ```
 
 The path is the key (so a path can't be listed twice), `~` and `$VAR` are expanded, and
 `"ro"` is shorthand for `{ mode = "ro" }`. Every path must exist — a missing one is a hard
-error, just like a bad `--ro`/`--rw`. Config mounts override the built-in defaults but lose
-to CLI flags, so `--rw <path>` still wins for a single run, and `--no-config` ignores the
-file entirely. See `config.toml.example`.
+error, just like a bad `--ro`/`--rw` — unless `optional = true`, which skips it. Config
+mounts override the built-in defaults but lose to CLI flags, so `--rw <path>` still wins for
+a single run, and `--no-config` ignores config entirely. See `config.toml.example`.
 
-A common use is mounting your **dotfiles repo read-only**: limes mounts your individual
-`.zshrc`/`.zprofile` (as resolved symlinks) but not the repo they live in, so anything
-those files source by repo-relative path (zsh plugins, helpers) isn't present without it.
+**`link = "parent"`** handles symlinked dotfiles. docker flattens a symlink when it mounts
+it, so a config like `~/.zshrc` that finds its plugins relative to its *own* resolved path
+would break inside the sandbox. With `link = "parent"`, limes instead **recreates the
+symlink** inside (pointing at the same target) and mounts the target's **parent directory**
+ro — so siblings like a zsh `plugins/` dir come along, and self-locating config resolves
+exactly as on the host.
+
+**Drop-ins:** alongside `config.toml`, limes also reads `~/.config/limes/config.d/*.toml`
+(merged, `config.toml` winning on collisions). `config.toml` is yours to hand-write;
+`config.d/` is for whole files owned by tools or installers — e.g. a dotfiles repo can ship
+one declaring its shell rc files with `link = "parent"`, so your full shell environment
+mirrors into the sandbox without limes needing to know anything about it.
 
 ## Building
 
