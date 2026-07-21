@@ -108,8 +108,15 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
 
     // Writable, ephemeral scratch: /tmp and an empty HOME the shell can write to.
     // The bind mounts below layer real dotfiles/state on top of the HOME tmpfs.
+    //
+    // `mode=1777` is load-bearing, not decoration. A tmpfs defaults to 1777, but when `-w`
+    // names a path *inside* it — which it does whenever the workspace lives under $HOME —
+    // Docker creates that directory chain and leaves the tmpfs root root-owned 0755. The
+    // container then runs as the invoking uid and cannot write its own $HOME, which breaks
+    // the symlink prelude below and anything else that writes there. Setting the mode
+    // explicitly survives that. Matches /tmp, which the image already chmods to 1777.
     cmd.args(["--tmpfs", "/tmp:exec"]);
-    cmd.args(["--tmpfs", &format!("{}:exec", ctx.home.display())]);
+    cmd.args(["--tmpfs", &format!("{}:exec,mode=1777", ctx.home.display())]);
 
     // Labels — what makes status/exec/stop/prune possible.
     let name = args.name.clone().unwrap_or_else(|| derive_name(&workspace));
