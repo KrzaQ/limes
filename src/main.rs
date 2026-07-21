@@ -10,6 +10,7 @@ mod config;
 mod context;
 mod doctor;
 mod docker;
+mod forward;
 mod mounts;
 mod passthrough;
 mod run;
@@ -114,6 +115,28 @@ pub struct RunArgs {
     /// Ignore ~/.config/limes/config.toml for this run
     #[arg(long)]
     pub no_config: bool,
+
+    // Credential/socket forwards. Each is on by default and settable standing in config
+    // `[forward]`; the paired flags let one run override config either way, so a standing
+    // `gpg = false` is still escapable with `--gpg`.
+    /// Forward the SSH agent socket (default)
+    #[arg(long = "ssh", overrides_with = "no_ssh")]
+    pub ssh: bool,
+    /// Do not forward the SSH agent socket
+    #[arg(long = "no-ssh", overrides_with = "ssh")]
+    pub no_ssh: bool,
+    /// Forward the GPG extra (restricted) agent socket (default)
+    #[arg(long = "gpg", overrides_with = "no_gpg")]
+    pub gpg: bool,
+    /// Do not forward the GPG agent socket
+    #[arg(long = "no-gpg", overrides_with = "gpg")]
+    pub no_gpg: bool,
+    /// Forward the limes docker socket (default)
+    #[arg(long = "docker", overrides_with = "no_docker")]
+    pub docker: bool,
+    /// Do not forward the limes docker socket
+    #[arg(long = "no-docker", overrides_with = "docker")]
+    pub no_docker: bool,
     /// Command to run in the sandbox (default: an interactive login zsh)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cmd: Vec<String>,

@@ -20,7 +20,7 @@ outside that model, and don't weaken the invariants that hold it up.
 ```
 make build      # cargo build
 make release    # cargo build --release  → target/release/lim
-make test       # cargo test  (no tests exist yet)
+make test       # cargo test  (unit tests for the precedence logic; no integration tests)
 make install    # cargo install --path .
 make fmt        # cargo fmt
 make clippy     # cargo clippy --all-targets
@@ -74,13 +74,21 @@ So a config entry overrides an implicit default, a CLI flag overrides config, an
 beats `--ro` for the same path in a single run. Order of the pushes *is* the policy —
 changing it changes user-visible precedence.
 
+**`forward.rs`** owns the credential/socket forwards (ssh, gpg, docker) and resolves each
+one **built-in default (on) → config `[forward]` → CLI flag**, mirroring how mounts layer.
+The paired `--gpg`/`--no-gpg` flags exist so the CLI can beat config in *both* directions;
+they rely on clap `overrides_with` for last-one-wins. Each forward no-ops silently when its
+target is absent, which is what makes on-by-default safe.
+
 **Nesting vs. collision** are different mechanisms: exact-path duplicates are resolved by
 `dedupe`; *nested* paths (`--ro ~/code --rw ~/code/project`) are two separate mounts that
 Docker layers, which is why depth-sorting matters.
 
 **`config.rs`** parses `~/.config/limes/config.toml` plus `config.d/*.toml` drop-ins
-(filename-sorted drop-ins first, `config.toml` last so it wins). Path-as-TOML-key gives
-uniqueness for free. `link = "parent"` exists because Docker flattens a symlink when it
+(filename-sorted drop-ins first, `config.toml` last so it wins). It carries two tables:
+`[mounts]`, where path-as-TOML-key gives uniqueness for free, and `[forward]`, whose
+fields are `Option<bool>` precisely so drop-ins merge field-by-field — `None` means "this
+file said nothing", which is what stops one file from clobbering another's unrelated keys. `link = "parent"` exists because Docker flattens a symlink when it
 mounts it: instead limes mounts the target's *parent directory* and emits a `SymlinkSpec`,
 which `run.rs` turns into an `sh -c 'ln -sfn …; exec "$@"'` prelude that recreates the
 symlink in the tmpfs `$HOME` before exec'ing the real command. This is what makes

@@ -10,10 +10,16 @@ use crate::agents;
 use crate::config;
 use crate::context::{Context, IMAGE_TAG, LABEL};
 use crate::docker;
+use crate::forward::{self, Forwards};
 use crate::mounts::{self, Mount};
 
 pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     let workspace = std::env::current_dir()?;
+
+    // Config feeds both the mounts below and the forwards further down, so load it once
+    // up front. `--no-config` means *entirely* ignored, forwards included.
+    let cfg = if args.no_config { None } else { config::load(ctx)? };
+    let forwards = Forwards::resolve(args, cfg.as_ref().map(|c| c.forward()));
 
     // ── Same-path mounts ────────────────────────────────────────────
     // Order matters: on an exact-path collision the *last* entry wins, so this runs
@@ -29,12 +35,10 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     // conveniences above, but still lose to the explicit CLI flags below). `link`
     // entries additionally produce symlinks to recreate inside the sandbox.
     let mut symlinks: Vec<config::SymlinkSpec> = Vec::new();
-    if !args.no_config {
-        if let Some(cfg) = config::load(ctx)? {
-            let resolved = cfg.resolve()?;
-            mounts.extend(resolved.mounts);
-            symlinks = resolved.symlinks;
-        }
+    if let Some(cfg) = &cfg {
+        let resolved = cfg.resolve()?;
+        mounts.extend(resolved.mounts);
+        symlinks = resolved.symlinks;
     }
     // User-supplied holes (canonicalized; must exist on host). `--rw` after `--ro`
     // so a path given both ways ends up writable.
@@ -80,10 +84,9 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     cmd.args(["--label", &format!("{LABEL}.workspace={}", workspace.display())]);
     cmd.args(["--label", &format!("{LABEL}.cmd={}", cmd_label(args))]);
 
-    // Forwarded credentials & sockets (dest may differ from source → not Mounts).
-    add_ssh_agent(&mut cmd);
-    add_gpg_agent(&mut cmd, ctx);
-    add_docker_socket(&mut cmd, ctx);
+    // Forwarded credentials & sockets. Before the user env passthrough below, so an
+    // explicit `-e` still wins over anything a forward sets.
+    forward::apply(&mut cmd, ctx, &forwards);
 
     // User env passthrough.
     for e in &args.env {
@@ -159,52 +162,6 @@ fn default_mounts(ctx: &Context) -> Vec<Mount> {
     }
 
     m
-}
-
-/// Forward the SSH agent (a signing oracle, not the keys).
-fn add_ssh_agent(cmd: &mut Command) {
-    if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
-        let sock = Path::new(&sock);
-        if sock.exists() {
-            let s = sock.display();
-            cmd.args(["-v", &format!("{s}:{s}")]);
-            cmd.args(["-e", "SSH_AUTH_SOCK"]);
-        }
-    }
-}
-
-/// Forward the GPG *extra* (restricted) socket onto the container's normal agent
-/// socket path, plus the public keyring read-only. Secret keys stay in the host agent.
-fn add_gpg_agent(cmd: &mut Command, ctx: &Context) {
-    let Ok(out) = Command::new("gpgconf")
-        .args(["--list-dir", "agent-extra-socket"])
-        .output()
-    else {
-        return;
-    };
-    if !out.status.success() {
-        return;
-    }
-    let extra = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if extra.is_empty() || !Path::new(&extra).exists() {
-        return;
-    }
-    let dest = format!("/run/user/{}/gnupg/S.gpg-agent", ctx.uid);
-    cmd.args(["-v", &format!("{extra}:{dest}")]);
-    let pubring = ctx.home.join(".gnupg/pubring.kbx");
-    if pubring.exists() {
-        let p = pubring.display();
-        cmd.args(["-v", &format!("{p}:{p}:ro")]);
-    }
-}
-
-/// Mount the limes daemon's own socket into the container as the normal docker
-/// socket, so tools inside drive the same daemon (docker-outside-of-docker). Nothing
-/// is nested: fixtures the sandbox starts are siblings on the limes daemon, not dind.
-fn add_docker_socket(cmd: &mut Command, ctx: &Context) {
-    let sock = ctx.socket();
-    cmd.args(["-v", &format!("{}:/var/run/docker.sock", sock.display())]);
-    cmd.args(["-e", "DOCKER_HOST=unix:///var/run/docker.sock"]);
 }
 
 /// Verify the daemon is up and the image is built before running.
@@ -290,5 +247,26 @@ fn shell_quote(s: &str) -> String {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Last-wins on an exact path is what makes the whole precedence chain work — it is
+    /// how a `--ro` beats a config mount, and how either beats the rosa/agent defaults.
+    #[test]
+    fn dedupe_keeps_last_mode_and_original_order() {
+        let mut m = vec![Mount::rw("/a".into()), Mount::ro("/b".into()), Mount::ro("/a".into())];
+        dedupe(&mut m);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0], Mount::ro("/a".into()), "later ro downgrades the earlier rw");
+        assert_eq!(m[1], Mount::ro("/b".into()));
+    }
+
+    #[test]
+    fn derive_name_sanitizes_workspace() {
+        assert_eq!(derive_name(Path::new("/home/u/my.proj")), "limes-my-proj");
     }
 }

@@ -49,6 +49,7 @@ lim run -- make test      # run a command instead of a shell
 lim --ro ~/code --rw ~/code/project    # read-only tree with a writable window
 lim --dry-run             # print the docker run it would execute, and stop
 lim --no-agents           # don't mount claude/opencode
+lim --no-gpg --no-docker  # turn off individual forwards for one run
 
 lim bootstrap             # one-time: set up the rootless daemon + build the image
 lim doctor                # health check of the installation
@@ -88,6 +89,24 @@ since it names absolute paths that differ across machines (same idea as `~/.gitc
 "~/.zshrc"    = { mode = "ro", link = "parent" }   # recreate the symlink, mount its dir
 "~/.zshrc.local" = { mode = "ro", optional = true } # skip if absent
 ```
+
+A `[forward]` table carries standing on/off switches for the credential and socket
+forwards, for the same reason: a machine where you never want GPG forwarded shouldn't need
+a flag on every run.
+
+```toml
+[forward]
+ssh    = true    # SSH agent socket           (default: on)
+gpg    = false   # GPG extra agent socket     (default: on)
+docker = false   # the limes docker socket    (default: on)
+```
+
+All four are on by default and each no-ops silently when the thing it forwards isn't there,
+so the defaults stay harmless on a host running none of them. Every one has a matching pair
+of flags — `--gpg` / `--no-gpg`, `--docker` / `--no-docker`, and so on — and the CLI wins
+over config in *both* directions, so a standing `gpg = false` is still escapable with
+`--gpg` for a single run. `docker = false` drops the socket *and* `DOCKER_HOST`, so nothing
+inside is left pointing at a socket that isn't there.
 
 The path is the key (so a path can't be listed twice), `~` and `$VAR` are expanded, and
 `"ro"` is shorthand for `{ mode = "ro" }`. Every path must exist — a missing one is a hard

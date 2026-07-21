@@ -30,3 +30,12 @@
 
 # Config mounts override the built-in defaults but lose to CLI flags: `--rw <path>` still
 # wins for a single run, and `--no-config` ignores this file entirely.
+
+# Standing on/off switches for the credential and socket forwards. All default to on, and
+# each no-ops silently when the thing it forwards isn't there — so you only need a line
+# here to turn something off. Same precedence as mounts: CLI beats config, in both
+# directions, so a `false` here is still escapable with `--gpg` for one run.
+# [forward]
+# ssh    = true    # SSH agent socket
+# gpg    = false   # GPG extra (restricted) agent socket
+# docker = false   # the limes docker socket (also drops DOCKER_HOST)

@@ -12,7 +12,14 @@
 //! "~/.zshrc"             = { mode = "ro", link = "parent" }   # recreate the symlink,
 //!                                                             # mount its target's dir
 //! "~/.zshrc.local"       = { mode = "ro", optional = true }   # skip if absent
+//!
+//! [forward]
+//! gpg = false                                                 # never forward gpg here
 //! ```
+//!
+//! `[forward]` carries standing on/off switches for the credential and socket forwards,
+//! for the same reason `[mounts]` exists: a preference that holds for every run on this
+//! machine belongs in a file, not in a flag you retype each time.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +34,32 @@ use crate::mounts::{self, Mount};
 pub struct Config {
     #[serde(default)]
     mounts: HashMap<String, MountSpec>,
+    #[serde(default)]
+    forward: Forward,
+}
+
+/// Standing on/off switches for the credential and socket forwards.
+///
+/// `Option<bool>` rather than `bool` is load-bearing: it distinguishes "this file says
+/// nothing about gpg" from "this file says gpg = false", which is what lets a drop-in and
+/// `config.toml` merge field-by-field instead of one clobbering the other wholesale.
+/// `None` throughout means "fall back to the built-in default".
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct Forward {
+    pub ssh: Option<bool>,
+    pub gpg: Option<bool>,
+    pub docker: Option<bool>,
+}
+
+impl Forward {
+    /// Overlay `other` onto `self`: every `Some` in `other` wins, every `None` leaves the
+    /// earlier value standing.
+    fn merge(&mut self, other: Forward) {
+        self.ssh = other.ssh.or(self.ssh);
+        self.gpg = other.gpg.or(self.gpg);
+        self.docker = other.docker.or(self.docker);
+    }
 }
 
 /// `"ro"` shorthand or the `{ mode = "ro", … }` long form. The bare-string form stays
@@ -95,6 +128,7 @@ pub struct Resolved {
 /// file wins on a key collision. Parse/IO errors hard-fail with the file path.
 pub fn load(ctx: &Context) -> Result<Option<Config>> {
     let mut merged: HashMap<String, MountSpec> = HashMap::new();
+    let mut forward = Forward::default();
     let mut found = false;
 
     if let Ok(entries) = std::fs::read_dir(ctx.config_d_dir()) {
@@ -104,16 +138,19 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
             .collect();
         files.sort();
         for f in files {
-            merged.extend(parse(&f)?.mounts);
+            let cfg = parse(&f)?;
+            merged.extend(cfg.mounts);
+            forward.merge(cfg.forward);
             found = true;
         }
     }
     if let Some(cfg) = parse_optional(&ctx.config_file())? {
         merged.extend(cfg.mounts);
+        forward.merge(cfg.forward);
         found = true;
     }
 
-    Ok(found.then_some(Config { mounts: merged }))
+    Ok(found.then_some(Config { mounts: merged, forward }))
 }
 
 fn parse(path: &Path) -> Result<Config> {
@@ -133,6 +170,11 @@ fn parse_optional(path: &Path) -> Result<Option<Config>> {
 }
 
 impl Config {
+    /// The standing forward switches, for `forward::Forwards::resolve` to layer CLI over.
+    pub fn forward(&self) -> Forward {
+        self.forward
+    }
+
     /// Turn config entries into mounts (+ symlinks to recreate). Missing paths hard-fail
     /// unless `optional`, matching CLI `--ro`/`--rw`.
     pub fn resolve(&self) -> Result<Resolved> {
@@ -186,5 +228,47 @@ fn mount(mode: Mode, path: PathBuf) -> Mount {
     match mode {
         Mode::Ro => Mount::ro(path),
         Mode::Rw => Mount::rw(path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_str(s: &str) -> Config {
+        toml::from_str(s).expect("valid config")
+    }
+
+    #[test]
+    fn forward_defaults_to_all_unset() {
+        let c = parse_str("[mounts]\n");
+        assert_eq!(c.forward.gpg, None);
+        assert_eq!(c.forward.docker, None);
+    }
+
+    #[test]
+    fn forward_parses_booleans() {
+        let c = parse_str("[forward]\ngpg = false\ndocker = true\n");
+        assert_eq!(c.forward.gpg, Some(false));
+        assert_eq!(c.forward.docker, Some(true));
+        assert_eq!(c.forward.ssh, None, "unmentioned keys stay unset");
+    }
+
+    /// A typo in a forward name must not silently do nothing — `deny_unknown_fields`
+    /// turns it into a parse error naming the file.
+    #[test]
+    fn forward_rejects_unknown_key() {
+        assert!(toml::from_str::<Config>("[forward]\ngpgg = false\n").is_err());
+    }
+
+    /// The drop-in merge: `config.toml` is applied last and wins, but only on the keys it
+    /// actually names — everything else a drop-in set must survive.
+    #[test]
+    fn later_file_wins_per_field() {
+        let mut f = parse_str("[forward]\ngpg = false\ndocker = false\n").forward;
+        f.merge(parse_str("[forward]\ngpg = true\n").forward);
+        assert_eq!(f.gpg, Some(true), "config.toml overrides the drop-in");
+        assert_eq!(f.docker, Some(false), "untouched key survives the merge");
+        assert_eq!(f.ssh, None);
     }
 }
