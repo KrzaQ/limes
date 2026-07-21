@@ -1,6 +1,6 @@
 # Convenience wrapper around cargo, plus machine-local targets via Makefile.local.
 
-.PHONY: build release test install fmt clippy help
+.PHONY: build release test install fmt clippy hooks unhooks help
 
 build: ## debug build
 	cargo build
@@ -19,6 +19,15 @@ fmt: ## format
 
 clippy: ## lint
 	cargo clippy --all-targets
+
+# core.hooksPath is per-clone config, so the hooks ship with the repo but stay opt-in.
+hooks: ## enable the repo's git hooks (pre-commit fmt check)
+	@git config core.hooksPath .githooks
+	@echo "git hooks enabled — .githooks/pre-commit will check rustfmt"
+
+unhooks: ## disable the repo's git hooks
+	@git config --unset core.hooksPath 2>/dev/null || true
+	@echo "git hooks disabled"
 
 help: ## list targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \

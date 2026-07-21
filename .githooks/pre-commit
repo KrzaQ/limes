@@ -1,0 +1,27 @@
+#!/bin/sh
+# Reject commits that aren't rustfmt-clean.
+#
+# Checks rather than reformats on purpose: a hook that edits files mid-commit leaves the
+# index disagreeing with the working tree, so what you reviewed is not what you committed.
+# Failing and letting you run `make fmt` keeps that boundary intact.
+#
+# Enable with `make hooks`, disable with `make unhooks` (both just set core.hooksPath, so
+# this file is version-controlled and shared, while enabling stays per-clone).
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not on PATH, skipping the fmt check" >&2
+    exit 0
+fi
+
+if cargo fmt --check >/dev/null 2>&1; then
+    exit 0
+fi
+
+echo "pre-commit: these files are not rustfmt-clean:" >&2
+cargo fmt --check 2>/dev/null \
+    | sed -n 's/^Diff in \(.*\):[0-9]*:$/  \1/p' \
+    | sort -u >&2
+echo >&2
+echo "  run \`make fmt\`, then stage and commit again" >&2
+echo "  (or \`git commit --no-verify\` to bypass this once)" >&2
+exit 1

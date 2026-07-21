@@ -24,7 +24,16 @@ make test       # cargo test  (unit tests for the precedence logic; no integrati
 make install    # cargo install --path .
 make fmt        # cargo fmt
 make clippy     # cargo clippy --all-targets
+make hooks      # enable the pre-commit fmt check (per-clone, opt-in)
+make unhooks    # disable it
 ```
+
+**The tree is rustfmt-clean and must stay that way.** `rustfmt.toml` sets
+`use_small_heuristics = "Max"`, which keeps short calls, literals and structs on one line
+— stock rustfmt explodes them across four and reads nothing like the rest of the codebase.
+Run `make fmt` before committing; `make hooks` installs a pre-commit check that refuses
+otherwise. The hook checks rather than reformats, so the index never diverges from what you
+reviewed.
 
 `Makefile.local` is untracked and machine-local (`-include`d by the Makefile); don't
 reference or commit it.
