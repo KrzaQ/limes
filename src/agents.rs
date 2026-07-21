@@ -24,7 +24,7 @@ const SPECS: &[AgentSpec] = &[
         name: "claude",
         bin: "claude",
         ro: &[".local/bin/claude", ".local/share/claude"],
-        rw: &[".claude"],
+        rw: &[".claude", ".claude.json"],
     },
     AgentSpec {
         name: "opencode",
