@@ -52,10 +52,11 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     let mut r = Report::new();
 
     // ── Rootless prerequisites ──────────────────────────────────────
-    for bin in ["newuidmap", "newgidmap", "slirp4netns", "rootlesskit", "dockerd-rootless.sh"] {
+    // The vendored launcher needs these on PATH; all are in official repos.
+    for bin in ["dockerd", "rootlesskit", "slirp4netns", "newuidmap", "newgidmap"] {
         match which(bin) {
             Some(p) => r.add(Health::Ok, bin, p),
-            None => r.add(Health::Fail, bin, "not found — install rootless docker + slirp4netns"),
+            None => r.add(Health::Fail, bin, "not found — install from your distro's repos"),
         }
     }
 
@@ -75,13 +76,21 @@ pub fn doctor(ctx: &Context) -> Result<()> {
         None => r.add(Health::Ok, "userns", "no sysctl gate (enabled)"),
     }
     match read_sysctl("kernel/apparmor_restrict_unprivileged_userns") {
-        Some(v) if v == "1" => {
-            r.add(Health::Warn, "apparmor userns", "restricted — a profile may be needed (Ubuntu 24.04+)")
-        }
+        Some(v) if v == "1" => r.add(
+            Health::Warn,
+            "apparmor userns",
+            "restricted — rootless needs an AppArmor userns profile (Docker's rootless-extras \
+             package bundles one; see docs.docker.com/engine/security/rootless/ troubleshooting)",
+        ),
         _ => r.add(Health::Ok, "apparmor userns", "unrestricted"),
     }
 
     // ── Daemon / service ────────────────────────────────────────────
+    if ctx.launcher_path().exists() {
+        r.add(Health::Ok, "launcher", ctx.launcher_path().display().to_string());
+    } else {
+        r.add(Health::Fail, "launcher", "vendored dockerd-rootless.sh missing — run `lim bootstrap`");
+    }
     if ctx.service_file().exists() {
         r.add(Health::Ok, "service unit", ctx.service_file().display().to_string());
     } else {

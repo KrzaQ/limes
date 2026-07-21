@@ -53,6 +53,12 @@ impl Context {
         self.home.join(".config/systemd/user").join(SERVICE)
     }
 
+    /// The vendored rootless launcher, written here by `bootstrap` and run by the
+    /// systemd unit — so setup needs no AUR / `docker-ce-rootless-extras` package.
+    pub fn launcher_path(&self) -> PathBuf {
+        self.home.join(".local/share/limes/bin/dockerd-rootless.sh")
+    }
+
     /// Per-machine config file (standing default mounts, future settings).
     /// Unmanaged, like `~/.gitconfig` — never symlinked from a dotfiles repo.
     pub fn config_file(&self) -> PathBuf {

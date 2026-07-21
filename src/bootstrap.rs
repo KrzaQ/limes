@@ -1,6 +1,7 @@
 //! `lim bootstrap` (host setup) and `lim build` (image build).
 
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -11,6 +12,9 @@ use crate::context::{Context, IMAGE_TAG, SERVICE};
 use crate::docker;
 
 const DOCKERFILE: &str = include_str!("../image/Dockerfile");
+/// Rootless launcher, vendored from Moby (Apache-2.0). We ship our own copy so setup
+/// needs only official-repo packages — no AUR / docker-ce-rootless-extras.
+const LAUNCHER: &str = include_str!("../vendor/dockerd-rootless.sh");
 
 pub fn build(ctx: &Context, no_cache: bool) -> Result<()> {
     if !docker::daemon_alive(ctx) {
@@ -49,18 +53,19 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
     println!("limes bootstrap{}:\n", if dry { " (dry run)" } else { "" });
 
     // ── 1. Prerequisites that need root / package installs ──────────
+    // We only *name* what's missing and let you install it your way — limes stays
+    // distro-agnostic and never prints a package-manager command that might be wrong
+    // for your system.
     let missing = missing_prereqs();
     if !missing.is_empty() {
-        println!("Prerequisites missing — these need root and can't be automated:\n");
+        println!("Missing prerequisites (each needs root to install or configure):\n");
         for m in &missing {
             println!("  • {m}");
         }
         println!(
-            "\nInstall them, then re-run `lim bootstrap`. On Arch, typically:\n\
-             \n  sudo pacman -S --needed slirp4netns rootlesskit docker\
-             \n  # subuid/subgid ranges for your user:\
-             \n  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"\
-             \n  grep -q ^\"$USER\": /etc/subuid /etc/subgid   # verify\n"
+            "\nInstall these with your distro's package manager, then re-run `lim bootstrap`.\n\
+             They set up rootless Docker: https://docs.docker.com/engine/security/rootless/\n\
+             subuid/subgid ranges are added with `usermod --add-subuids/--add-subgids <user>`.\n"
         );
         if !dry {
             bail!("prerequisites missing (see above)");
@@ -68,7 +73,21 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
         println!("(dry run: continuing to show remaining steps)\n");
     }
 
-    // ── 2. systemd user unit for the dedicated rootless daemon ──────
+    // ── 2. Vendored rootless launcher ───────────────────────────────
+    let launcher_path = ctx.launcher_path();
+    if dry {
+        println!("would write launcher to {}", launcher_path.display());
+    } else {
+        std::fs::create_dir_all(launcher_path.parent().unwrap())
+            .with_context(|| format!("creating {}", launcher_path.parent().unwrap().display()))?;
+        std::fs::write(&launcher_path, LAUNCHER)
+            .with_context(|| format!("writing {}", launcher_path.display()))?;
+        std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod {}", launcher_path.display()))?;
+        println!("wrote {}", launcher_path.display());
+    }
+
+    // ── 3. systemd user unit for the dedicated rootless daemon ──────
     let unit_path = ctx.service_file();
     let unit = render_unit();
     if dry {
@@ -83,12 +102,12 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
         println!("wrote {}", unit_path.display());
     }
 
-    // ── 3. Enable + start the service, enable linger ────────────────
+    // ── 4. Enable + start the service, enable linger ────────────────
     systemd(dry, &["--user", "daemon-reload"])?;
     systemd(dry, &["--user", "enable", "--now", SERVICE])?;
     loginctl_linger(dry)?;
 
-    // ── 4. Wait for the socket, then build the image ────────────────
+    // ── 5. Wait for the socket, then build the image ────────────────
     if dry {
         println!("would wait for {} and build {IMAGE_TAG}", ctx.socket().display());
         return Ok(());
@@ -108,7 +127,9 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
 /// Prerequisites limes cannot install itself (need root / package manager).
 fn missing_prereqs() -> Vec<String> {
     let mut missing = Vec::new();
-    for bin in ["slirp4netns", "rootlesskit", "dockerd-rootless.sh", "newuidmap"] {
+    // We vendor dockerd-rootless.sh ourselves; it needs rootlesskit + dockerd + a network
+    // backend on PATH, all in official repos (no AUR / docker-ce-rootless-extras).
+    for bin in ["dockerd", "rootlesskit", "slirp4netns", "newuidmap"] {
         if which(bin).is_none() {
             missing.push(format!("`{bin}` not on PATH"));
         }
@@ -137,7 +158,7 @@ fn render_unit() -> String {
          \n\
          [Service]\n\
          Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n\
-         ExecStart=dockerd-rootless.sh --data-root %h/.local/share/limes/docker --host unix://%t/limes-docker.sock\n\
+         ExecStart=%h/.local/share/limes/bin/dockerd-rootless.sh --data-root %h/.local/share/limes/docker --host unix://%t/limes-docker.sock\n\
          ExecReload=/bin/kill -s HUP $MAINPID\n\
          TimeoutSec=0\n\
          RestartSec=2\n\

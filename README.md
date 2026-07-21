@@ -62,10 +62,14 @@ lim docker ps             # run docker against the limes daemon
 
 ## Setup
 
-`lim bootstrap` automates what it can and prints precise instructions for the steps that
-need root (installing rootless Docker prerequisites and subordinate-id ranges). After
-those are in place it writes a `limes-docker.service` user unit, starts it, and builds
-the image. Run `lim doctor` any time to see what's missing.
+`lim bootstrap` names any missing prerequisites and stops (it never runs a package manager
+for you). They're all in **official repos** — `docker`, `rootlesskit`, `slirp4netns`, and
+`shadow` (for `newuidmap`) — so there's no AUR package on Arch and no
+`docker-ce-rootless-extras` on Debian/Ubuntu: limes vendors the rootless launcher
+(`dockerd-rootless.sh`, from Moby, Apache-2.0) and installs it to `~/.local/share/limes/bin`
+itself. Once the prerequisites and subuid/subgid ranges are in place, bootstrap writes a
+`limes-docker.service` user unit, starts it, and builds the image. Run `lim doctor` any time
+to see what's missing.
 
 Auto mode inside the container relies on your host `~/.claude` settings — remove any
 `permissions.disableAutoMode` and set `"defaultMode": "acceptEdits"` in
