@@ -13,32 +13,28 @@ use crate::docker;
 use crate::forward::{self, Forwards};
 use crate::mounts::{self, Mount};
 
-pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
-    let workspace = std::env::current_dir()?;
-
-    // Config feeds both the mounts below and the forwards further down, so load it once
-    // up front. `--no-config` means *entirely* ignored, forwards included.
-    let cfg = if args.no_config { None } else { config::load(ctx)? };
-    let forwards = Forwards::resolve(args, cfg.as_ref().map(|c| c.forward()));
-
-    // ── Same-path mounts ────────────────────────────────────────────
-    // Order matters: on an exact-path collision the *last* entry wins, so this runs
-    // from least to most explicit — internal defaults, then the workspace, then the
-    // user's own flags, which therefore override everything before them.
+/// Assemble the mount table.
+///
+/// Order is least-to-most explicit; `dedupe` then collapses exact-path collisions with
+/// last-wins, and `sort_for_nesting` orders parent-before-child. `extra` is whatever the
+/// caller detected (agents, rosa) and slots in after the built-in defaults, so config and
+/// the CLI still override it.
+fn assemble_mounts(
+    ctx: &Context,
+    args: &RunArgs,
+    cfg: &Option<config::Config>,
+    workspace: &Path,
+    extra: Vec<Mount>,
+) -> Result<(Vec<Mount>, Vec<config::SymlinkSpec>)> {
     let mut mounts = default_mounts(ctx);
-    // Auto-detected agents (program files ro, state dirs rw).
-    let detected = agents::detect(ctx, args);
-    mounts.extend(detected.mounts);
-    // rosa's socket and client binary — same-path, so they ride the normal precedence
-    // chain rather than being bolted on as raw `-v` args the way ssh/gpg have to be.
-    mounts.extend(forward::rosa_mounts(ctx, forwards.rosa));
+    mounts.extend(extra);
     // Workspace is read-write by default.
-    mounts.push(Mount::rw(workspace.clone()));
+    mounts.push(Mount::rw(workspace.to_path_buf()));
     // Standing defaults from config.toml + config.d/*.toml (override the implicit
     // conveniences above, but still lose to the explicit CLI flags below). `link`
     // entries additionally produce symlinks to recreate inside the sandbox.
     let mut symlinks: Vec<config::SymlinkSpec> = Vec::new();
-    if let Some(cfg) = &cfg {
+    if let Some(cfg) = cfg {
         let resolved = cfg.resolve()?;
         mounts.extend(resolved.mounts);
         symlinks = resolved.symlinks;
@@ -54,6 +50,24 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
 
     dedupe(&mut mounts);
     mounts::sort_for_nesting(&mut mounts);
+    Ok((mounts, symlinks))
+}
+
+pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
+    let workspace = std::env::current_dir()?;
+
+    // Config feeds both the mounts below and the forwards further down, so load it once
+    // up front. `--no-config` means *entirely* ignored, forwards included.
+    let cfg = if args.no_config { None } else { config::load(ctx)? };
+    let forwards = Forwards::resolve(args, cfg.as_ref().map(|c| c.forward()));
+
+    // Auto-detected agents (program files ro, state dirs rw), plus rosa's socket and
+    // client binary — both same-path, so they ride the normal precedence chain rather
+    // than being bolted on as raw `-v` args the way ssh/gpg have to be.
+    let detected = agents::detect(ctx, args);
+    let mut extra = detected.mounts.clone();
+    extra.extend(forward::rosa_mounts(ctx, forwards.rosa));
+    let (mounts, symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
 
     // ── docker run ──────────────────────────────────────────────────
     let mut cmd = docker::command(ctx);
