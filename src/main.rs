@@ -157,6 +157,9 @@ pub struct RunArgs {
     /// Do not auto-detect and mount host opencode
     #[arg(long)]
     pub no_opencode: bool,
+    /// Do not auto-detect and mount host cursor-agent
+    #[arg(long)]
+    pub no_cursor: bool,
     /// Ignore ~/.config/limes/config.toml for this run
     #[arg(long)]
     pub no_config: bool,

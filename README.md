@@ -1,6 +1,6 @@
 # limes
 
-A host-mirroring sandbox for running coding agents (Claude Code, opencode) and dev
+A host-mirroring sandbox for running coding agents (Claude Code, opencode, cursor) and dev
 commands. `limes` drops you into `zsh` inside a container that **mirrors your host
 userland read-only**, carves out **explicit read-write holes**, and talks only to a
 **dedicated rootless Docker daemon**. The command is `lim`.
@@ -30,9 +30,10 @@ If you need to contain a hostile process, use a VM, not this.
   `--ro ~/code --rw ~/code/project` makes `~/code` read-only with a writable window.
 - **Ephemeral by construction**: read-only rootfs, a tmpfs `/tmp`, and a tmpfs `$HOME`.
   Nothing persists except your explicit `--rw` mounts, and `~/.claude`.
-- **Auto-detects agents**: if `claude` / `opencode` are on your host `PATH`, their
-  program files are mounted read-only and their auth/state read-write, so they run
-  already signed in. Opt out with `--no-agents` / `--no-claude` / `--no-opencode`.
+- **Auto-detects agents**: if `claude` / `opencode` / `cursor-agent` are on your host
+  `PATH`, their program files are mounted read-only and their auth/state read-write, so they
+  run already signed in. Opt out with `--no-agents`, or per agent with `--no-claude` /
+  `--no-opencode` / `--no-cursor`.
 - **Forwards credentials, never keys**: the SSH agent socket, the GPG *extra* (restricted)
   socket, and `~/.gitconfig` — the container can *use* your keys while the agent is
   unlocked but cannot read them out.
@@ -54,7 +55,7 @@ lim run -- make test      # run a command instead of a shell
 lim --ro ~/code --rw ~/code/project    # read-only tree with a writable window
 lim --ro ~/.config --hide ~/.config/gh # ...and a subtractive hole: empty inside
 lim --dry-run             # print the docker run it would execute, and stop
-lim --no-agents           # don't mount claude/opencode
+lim --no-agents           # don't mount claude/opencode/cursor
 lim --no-gpg --no-docker  # turn off individual forwards for one run
 
 lim bootstrap             # one-time: set up the rootless daemon + build the image

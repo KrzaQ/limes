@@ -32,6 +32,17 @@ const SPECS: &[AgentSpec] = &[
         ro: &[".opencode"],
         rw: &[".local/share/opencode", ".config/opencode"],
     },
+    // `.config/cursor` holds auth.json. It is a *shared agent credential*, like `~/.claude`
+    // — deliberately mounted so the agent runs authenticated inside — not key material the
+    // oracle rule is about. Worth stating because a broad `~/.config` mount plus a `hide`
+    // blocklist will otherwise sweep it up as "an auth.json, hide it" and quietly break
+    // cursor-agent in the sandbox; config `hide` is pushed after agents and would win.
+    AgentSpec {
+        name: "cursor",
+        bin: "cursor-agent",
+        ro: &[".local/bin/cursor-agent", ".local/share/cursor-agent"],
+        rw: &[".config/cursor", ".cursor"],
+    },
 ];
 
 /// Mounts for every detected, non-opted-out agent, plus their names (for messaging).
@@ -50,6 +61,7 @@ pub fn detect(ctx: &Context, args: &RunArgs) -> Detected {
         let opted_out = match spec.name {
             "claude" => args.no_claude,
             "opencode" => args.no_opencode,
+            "cursor" => args.no_cursor,
             _ => false,
         };
         if opted_out || find_in_path(spec.bin).is_none() {
