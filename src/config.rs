@@ -32,7 +32,12 @@ use serde::Deserialize;
 use crate::context::Context;
 use crate::mounts::{self, Mount};
 
+/// `deny_unknown_fields` so a key in the wrong place is an error rather than a silence.
+/// Serde's default is to ignore what it doesn't recognise, which turns a mount written at
+/// the top level instead of under `[mounts]` -- or a typo in `data_root` -- into a setting
+/// that simply never happens, with limes reporting nothing at all.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     mounts: HashMap<String, MountSpec>,
