@@ -113,6 +113,7 @@ pub struct RunSpec {
 #[cfg(target_os = "linux")]
 fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     let workspace = std::env::current_dir()?;
+    check_workspace(ctx, &workspace)?;
 
     // Config feeds both the mounts below and the forwards further down, so load it once
     // up front. `--no-config` means *entirely* ignored, forwards included.
@@ -496,6 +497,29 @@ fn dedupe(mounts: &mut Vec<Mount>) {
 /// length limit — and it exists so `lim status` stays scannable.
 #[cfg(target_os = "linux")]
 const NAME_MAX: usize = 64;
+
+/// Refuse the one workspace that cannot work: `$HOME` itself.
+///
+/// The sandbox shadows `$HOME` with an empty tmpfs *and* binds the workspace read-write, so
+/// naming $HOME as the workspace asks docker for both on one path. What docker says back is
+/// "Duplicate mount point: /home/you" -- a complaint about an argument list the caller never
+/// wrote, naming neither the tmpfs nor the cwd that produced it. Say it in limes' terms
+/// before we get that far.
+#[cfg(target_os = "linux")]
+fn check_workspace(ctx: &Context, workspace: &Path) -> Result<()> {
+    // getcwd is already canonical; $HOME need not be, and comparing a symlinked home
+    // against a resolved cwd would miss the very case this exists to catch.
+    let home = ctx.home.canonicalize().unwrap_or_else(|_| ctx.home.clone());
+    if workspace == home {
+        bail!(
+            "the workspace is $HOME ({}), which limes shadows with an empty tmpfs so that a \
+             sandbox never gets your home wholesale -- the workspace mount and that tmpfs \
+             cannot share a path.\ncd into a project directory and re-run.",
+            workspace.display()
+        );
+    }
+    Ok(())
+}
 
 /// Container name from the **whole** workspace path, not its basename.
 ///
