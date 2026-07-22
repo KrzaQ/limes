@@ -24,6 +24,10 @@ pub struct Context {
     /// The host's own hostname, which the sandbox mirrors by default (see `sandbox_hostname`).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub hostname: String,
+    /// Resolved once here rather than recomputed per call site, because `bootstrap` bakes
+    /// it into a systemd unit while `prune` names it in a warning: the two disagreeing
+    /// would mean pruning a data-root the daemon isn't using.
+    data_root: PathBuf,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -36,7 +40,17 @@ impl Context {
         let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
-        Ok(Self { uid, gid, home, xdg_runtime_dir, hostname: detect_hostname() })
+        let data_root = home.join(".local/share/limes/docker");
+        let mut ctx =
+            Self { uid, gid, home, xdg_runtime_dir, hostname: detect_hostname(), data_root };
+        // The config only overrides the default; loading it needs nothing from the Context
+        // beyond `home`/`XDG_CONFIG_HOME`, both already set above. A parse error fails every
+        // command rather than only `run`, which is the point: a data-root limes can't read
+        // is not something to shrug off and silently substitute the default for.
+        if let Some(root) = crate::config::load(&ctx)?.and_then(|c| c.data_root().transpose()) {
+            ctx.data_root = root?;
+        }
+        Ok(ctx)
     }
 
     /// The dedicated limes daemon socket — never the system/rootful one.
@@ -77,8 +91,12 @@ impl Context {
 
     /// Dedicated data-root, so cleanup/prune only ever touches limes's own subtree,
     /// never images or volumes from any other Docker daemon.
+    ///
+    /// Defaults under `$HOME`, overridable with `data_root` in config — which is not a
+    /// taste knob: the daemon stacks an overlay over this path, and some filesystems
+    /// (ecryptfs, notably) cannot carry an overlayfs `upperdir` at all.
     pub fn data_root(&self) -> PathBuf {
-        self.home.join(".local/share/limes/docker")
+        self.data_root.clone()
     }
 
     #[cfg(target_os = "linux")]

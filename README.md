@@ -168,6 +168,19 @@ you. `hide` is a bridge, not a guarantee of completeness — the real fix is not
 `~/.config` wholesale in the first place. It does not change the standing rule that
 credentials should reach the sandbox as *oracles* (agent sockets), never as key material.
 
+**Data-root:** the daemon keeps its images and layers in `~/.local/share/limes/docker`.
+It stacks an overlay over that path, so it has to sit on a filesystem the kernel accepts as
+an overlayfs `upperdir` — and an encrypted home (ecryptfs, as offered by several distro
+installers) is not one. On such a machine, point it elsewhere:
+
+```toml
+data_root = "/var/lib/limes/you/docker"   # absolute; any path you own on ext4/xfs/btrfs
+```
+
+`lim bootstrap` refuses to set up a daemon whose data-root cannot work, and `lim doctor`
+reports the filesystem — without either, the symptom is an `EINVAL` deep inside a buildkit
+cache mount on your first image build, which names neither the data-root nor the reason.
+
 **Drop-ins:** alongside `config.toml`, limes also reads `~/.config/limes/config.d/*.toml`
 (merged, `config.toml` winning on collisions). `config.toml` is yours to hand-write;
 `config.d/` is for whole files owned by tools or installers — e.g. a dotfiles repo can ship

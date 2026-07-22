@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result, bail};
@@ -9,7 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use crate::BootstrapArgs;
 use crate::context::{Context, IMAGE_TAG, SERVICE};
 use crate::docker;
-use crate::util::find_in_path;
+use crate::util::{self, find_in_path};
 
 const DOCKERFILE: &str = include_str!("../image/Dockerfile");
 /// Rootless launcher, vendored from Moby (Apache-2.0). We ship our own copy so setup
@@ -73,6 +74,25 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
         println!("(dry run: continuing to show remaining steps)\n");
     }
 
+    // ── 1b. A data-root the daemon can actually stack an overlay on ──
+    // Checked here, before the unit is written and the daemon started, because the
+    // failure it prevents surfaces much later and much further away: the daemon comes up
+    // fine and the *first image build* dies in buildkit with an EINVAL on a cache mount,
+    // naming neither the data-root nor the filesystem.
+    let data_root = ctx.data_root();
+    if let Some(fs) = util::unsupported_upperdir_fs(&data_root) {
+        bail!(
+            "data-root {} is on {fs}, which cannot hold an overlayfs upperdir — the daemon \
+             would start but every image build would fail.\n\
+             Point it at a filesystem that can (ext4, xfs, btrfs) by adding to \
+             ~/.config/limes/config.toml:\n\n    \
+             data_root = \"/var/lib/limes/$USER/docker\"\n\n\
+             The directory is created on the next `lim bootstrap`; it needs to be one you \
+             own and can write.",
+            data_root.display()
+        );
+    }
+
     // ── 2. Vendored rootless launcher ───────────────────────────────
     let launcher_path = ctx.launcher_path();
     if dry {
@@ -89,14 +109,14 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
 
     // ── 3. systemd user unit for the dedicated rootless daemon ──────
     let unit_path = ctx.service_file();
-    let unit = unit_file();
+    let unit = unit_file(&data_root);
     if dry {
-        println!("would write {}:\n{}", unit_path.display(), indent(unit));
+        println!("would write {}:\n{}", unit_path.display(), indent(&unit));
     } else {
         std::fs::create_dir_all(unit_path.parent().unwrap())
             .with_context(|| format!("creating {}", unit_path.parent().unwrap().display()))?;
-        std::fs::create_dir_all(ctx.data_root())
-            .with_context(|| format!("creating data-root {}", ctx.data_root().display()))?;
+        std::fs::create_dir_all(&data_root)
+            .with_context(|| format!("creating data-root {}", data_root.display()))?;
         std::fs::write(&unit_path, unit)
             .with_context(|| format!("writing {}", unit_path.display()))?;
         println!("wrote {}", unit_path.display());
@@ -149,10 +169,14 @@ fn missing_prereqs() -> Vec<String> {
 /// The systemd **user** unit — dedicated data-root and socket, mirroring Docker's
 /// official rootless unit but namespaced to limes.
 ///
-/// Nothing here is interpolated by us: `%h` and `%t` are systemd's own specifiers, which is
-/// why this is a constant rather than a format string.
-fn unit_file() -> &'static str {
-    "[Unit]\n\
+/// `%h` and `%t` are systemd's own specifiers, left for it to expand; the data-root is the
+/// only thing substituted here.
+fn unit_file(data_root: &Path) -> String {
+    // The data-root is the one interpolated value: it is configurable, so it can point
+    // outside `$HOME` and `%h` can no longer stand in for it. Quoted because systemd
+    // splits ExecStart on whitespace and a path may contain some.
+    format!(
+        "[Unit]\n\
          Description=limes dedicated rootless Docker daemon\n\
          Documentation=https://docs.docker.com/go/rootless/\n\
          After=network-online.target\n\
@@ -160,7 +184,7 @@ fn unit_file() -> &'static str {
          \n\
          [Service]\n\
          Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n\
-         ExecStart=%h/.local/share/limes/bin/dockerd-rootless.sh --data-root %h/.local/share/limes/docker --host unix://%t/limes-docker.sock\n\
+         ExecStart=%h/.local/share/limes/bin/dockerd-rootless.sh --data-root \"{}\" --host unix://%t/limes-docker.sock\n\
          ExecReload=/bin/kill -s HUP $MAINPID\n\
          TimeoutSec=0\n\
          RestartSec=2\n\
@@ -177,7 +201,9 @@ fn unit_file() -> &'static str {
          KillMode=mixed\n\
          \n\
          [Install]\n\
-         WantedBy=default.target\n"
+         WantedBy=default.target\n",
+        data_root.display()
+    )
 }
 
 fn systemd(dry: bool, args: &[&str]) -> Result<()> {

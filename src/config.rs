@@ -42,6 +42,11 @@ pub struct Config {
     /// `Option` for the same reason `Forward`'s fields are — so drop-ins merge field-by-field.
     #[serde(default)]
     hostname_suffix: Option<String>,
+    /// Where the dedicated daemon keeps its images and layers; `None` means the default
+    /// under `$HOME`. Exists because that default is unusable on a machine whose `$HOME`
+    /// is a filesystem overlayfs won't stack on — see `util::unsupported_upperdir_fs`.
+    #[serde(default)]
+    data_root: Option<String>,
 }
 
 /// Standing on/off switches for the credential and socket forwards.
@@ -144,6 +149,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
     let mut merged: HashMap<String, MountSpec> = HashMap::new();
     let mut forward = Forward::default();
     let mut hostname_suffix: Option<String> = None;
+    let mut data_root: Option<String> = None;
     let mut found = false;
 
     if let Ok(entries) = std::fs::read_dir(ctx.config_d_dir()) {
@@ -157,6 +163,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
             merged.extend(cfg.mounts);
             forward.merge(cfg.forward);
             hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
+            data_root = cfg.data_root.or(data_root);
             found = true;
         }
     }
@@ -164,10 +171,11 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         merged.extend(cfg.mounts);
         forward.merge(cfg.forward);
         hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
+        data_root = cfg.data_root.or(data_root);
         found = true;
     }
 
-    Ok(found.then_some(Config { mounts: merged, forward, hostname_suffix }))
+    Ok(found.then_some(Config { mounts: merged, forward, hostname_suffix, data_root }))
 }
 
 fn parse(path: &Path) -> Result<Config> {
@@ -197,6 +205,21 @@ impl Config {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn hostname_suffix(&self) -> Option<&str> {
         self.hostname_suffix.as_deref()
+    }
+
+    /// The configured data-root, expanded. Absolute is required: the path is written into
+    /// a systemd unit, which has no working directory to resolve it against, so a relative
+    /// value would land somewhere neither of us intended.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn data_root(&self) -> Result<Option<PathBuf>> {
+        let Some(raw) = self.data_root.as_deref() else { return Ok(None) };
+        let expanded = shellexpand::full(raw)
+            .with_context(|| format!("expanding config `data_root = \"{raw}\"`"))?;
+        let path = PathBuf::from(expanded.as_ref());
+        if !path.is_absolute() {
+            bail!("config `data_root = \"{raw}\"` must be an absolute path");
+        }
+        Ok(Some(path))
     }
 
     /// Turn config entries into mounts (+ symlinks to recreate). Missing paths hard-fail

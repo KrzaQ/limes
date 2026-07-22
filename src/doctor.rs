@@ -93,6 +93,24 @@ pub fn doctor(ctx: &Context) -> Result<()> {
         _ => r.add(Health::Ok, "apparmor userns", "unrestricted"),
     }
 
+    // ── Data-root ───────────────────────────────────────────────────
+    // The daemon stacks an overlay over this path, so the filesystem under it decides
+    // whether image builds can work at all — and when it can't, the error lands in
+    // buildkit rather than anywhere that mentions the data-root.
+    let data_root = ctx.data_root();
+    match crate::util::unsupported_upperdir_fs(&data_root) {
+        None => r.add(Health::Ok, "data-root", data_root.display().to_string()),
+        Some(fs) => r.add(
+            Health::Fail,
+            "data-root",
+            format!(
+                "{} is on {fs} — no overlayfs upperdir, so image builds fail; set \
+                 `data_root` in ~/.config/limes/config.toml to a path on ext4/xfs/btrfs",
+                data_root.display()
+            ),
+        ),
+    }
+
     // ── Daemon / service ────────────────────────────────────────────
     if ctx.launcher_path().exists() {
         r.add(Health::Ok, "launcher", ctx.launcher_path().display().to_string());

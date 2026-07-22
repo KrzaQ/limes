@@ -60,3 +60,17 @@
 # gpg    = false   # GPG extra (restricted) agent socket
 # rosa   = true    # sub rosa secret broker: socket + client binary
 # docker = false   # the limes docker socket (also drops DOCKER_HOST)
+
+# Where the dedicated daemon keeps its images and layers. Defaults to
+# ~/.local/share/limes/docker; Linux-only (the macOS backend has no daemon and ignores it).
+#
+# Not a taste knob: docker stacks an overlay over this path, and some filesystems cannot
+# carry an overlayfs upperdir at all. ecryptfs is the one that bites -- if your distro
+# installer offered to "encrypt your home directory" and you said yes, the default is
+# unusable and the failure surfaces as an EINVAL inside buildkit on the first image build.
+# `lim doctor` names the filesystem; `lim bootstrap` refuses rather than leaving you to
+# find that out from a cache-mount stack trace.
+#
+# Must be absolute (it is written into a systemd unit, which has no cwd to resolve against)
+# and must be a path you own and can write.
+# data_root = "/var/lib/limes/you/docker"
