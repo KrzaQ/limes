@@ -152,9 +152,10 @@ under it that hold credentials. Precedence is the ordinary one, so a `hide` beat
 earlier mount of the same path, and depth-sorting puts it on top of its parent. It applies
 to **directories only** (hiding a file is a hard error naming its parent), the shadow is
 writable but ephemeral — an app that recreates its config finds an empty dir and gets on
-with it, and nothing it writes reaches the host — and hiding a path that doesn't exist is a
-silent no-op rather than an error, so a synced drop-in can name dirs that exist on only
-some of your machines.
+with it, and nothing it writes reaches the host — it takes the host directory's own
+permissions, so hiding a `0700` credential dir never leaves a `0755` one in its place, and
+hiding a path that doesn't exist is a silent no-op rather than an error, so a synced drop-in
+can name dirs that exist on only some of your machines.
 
 Be clear-eyed about what it is: **a blocklist, and blocklists rot.** The tool you install
 next month puts a token in `~/.config/newtool/`, nobody updates the list, and nothing warns

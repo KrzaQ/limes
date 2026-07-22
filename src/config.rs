@@ -221,8 +221,8 @@ impl Config {
                          mode=\"hide\" — it would hide the symlink target's parent dir"
                     );
                 }
-                if let Some(p) = mounts::resolve_hide(&path)? {
-                    mounts.push(Mount::hide(p));
+                if let Some((p, mode)) = mounts::resolve_hide(&path)? {
+                    mounts.push(Mount::hide(p, mode));
                 }
                 continue;
             }

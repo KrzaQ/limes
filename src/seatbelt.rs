@@ -98,7 +98,9 @@ fn rule(m: &Mount) -> String {
     match m.kind {
         Kind::Ro => format!("(deny file-write* (subpath {p}))"),
         Kind::Rw => format!("(allow file-write* (subpath {p}))"),
-        Kind::Hide => format!("(deny file-read* file-write* (subpath {p}))"),
+        // The mode a Linux hide carries is meaningless here: there is no shadow directory to
+        // give a mode to, only a denial of the host's own.
+        Kind::Hide(_) => format!("(deny file-read* file-write* (subpath {p}))"),
     }
 }
 
@@ -156,7 +158,7 @@ mod tests {
     /// tree it is shadowing lives.
     #[test]
     fn hide_denies_both_reads_and_writes() {
-        let p = mkprofile(&[Mount::hide("/a".into())]);
+        let p = mkprofile(&[Mount::hide("/a".into(), 0o755)]);
         assert!(p.contains(r#"(deny file-read* file-write* (subpath "/a"))"#), "got: {p}");
     }
 
@@ -164,7 +166,7 @@ mod tests {
     /// is the whole point of the mode, and Seatbelt takes the *last* matching rule.
     #[test]
     fn nested_hide_is_emitted_after_its_parent() {
-        let mut m = vec![Mount::hide("/a/b/creds".into()), Mount::ro("/a".into())];
+        let mut m = vec![Mount::hide("/a/b/creds".into(), 0o700), Mount::ro("/a".into())];
         crate::mounts::sort_for_nesting(&mut m);
         let p = mkprofile(&m);
         let parent = p.find(r#"(deny file-write* (subpath "/a"))"#).expect("parent rule");
@@ -175,8 +177,11 @@ mod tests {
     /// Emitting anything narrower than `file-write*` would be unfixable by ordering.
     #[test]
     fn never_emits_a_narrow_write_operation() {
-        let p =
-            mkprofile(&[Mount::rw("/a".into()), Mount::ro("/b".into()), Mount::hide("/c".into())]);
+        let p = mkprofile(&[
+            Mount::rw("/a".into()),
+            Mount::ro("/b".into()),
+            Mount::hide("/c".into(), 0o755),
+        ]);
         for narrow in ["file-write-unlink", "file-write-create", "file-write-data"] {
             assert!(!p.contains(narrow), "profile must not name {narrow}");
         }

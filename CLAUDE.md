@@ -114,9 +114,11 @@ direction. Order of the pushes *is* the policy — changing it changes user-visi
 precedence.
 
 A `Mount` is **not** a bind mount: it is a policy for one path *inside* the sandbox, which
-each backend renders its own way (`-v`, `--tmpfs`, or an SBPL rule). `Kind` is deliberately
-payload-free so `Mount` stays `PartialEq` — `dedupe` copies the whole kind, and copying any
-less quietly breaks last-wins for a mode that carries more than read-only-ness.
+each backend renders its own way (`-v`, `--tmpfs`, or an SBPL rule). `Kind` must stay
+`Copy + Eq` so `Mount` stays `PartialEq` — `dedupe` copies the whole kind, and copying any
+less quietly breaks last-wins for a mode that carries more than read-only-ness. `Hide`
+*does* carry more: the host directory's mode, so a hidden path is never wider inside than
+out.
 
 **`forward.rs`** owns the four credential/socket forwards (ssh, gpg, rosa, docker) and
 resolves each one **built-in default (on) → config `[forward]` → CLI flag**, mirroring how

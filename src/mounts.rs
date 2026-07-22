@@ -14,8 +14,10 @@ use anyhow::{Context as _, Result, bail};
 
 /// What a path's policy is inside the sandbox.
 ///
-/// Deliberately payload-free, so `Mount` stays `PartialEq` — `run::dedupe` compares and
-/// copies whole kinds, and the precedence tests rest on that.
+/// `Mount` must stay `PartialEq` — `run::dedupe` compares and copies whole kinds, and the
+/// precedence tests rest on that — so any payload here has to be `Copy + Eq`. `Hide`'s is:
+/// the host mode to give the shadow, which is the one thing about a hidden directory that
+/// is not simply "empty".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// Bind the host path in, read-only.
@@ -24,7 +26,11 @@ pub enum Kind {
     Rw,
     /// Shadow the path with an empty tmpfs: it exists inside, but the host's contents
     /// are unreachable. Subtractive — a hole punched in some broader mount.
-    Hide,
+    ///
+    /// Carries the host directory's mode. A fabricated 0755 over a host 0700 *widens* the
+    /// directory relative to the host, which is the same class of bug as the one the
+    /// invented-directory mirroring fixes; the sandbox should never invent a mode.
+    Hide(u32),
 }
 
 /// A single path policy request.
@@ -41,8 +47,8 @@ impl Mount {
     pub fn rw(p: PathBuf) -> Self {
         Self { path: p, kind: Kind::Rw }
     }
-    pub fn hide(p: PathBuf) -> Self {
-        Self { path: p, kind: Kind::Hide }
+    pub fn hide(p: PathBuf, mode: u32) -> Self {
+        Self { path: p, kind: Kind::Hide(mode) }
     }
 
     /// Lower this policy to the docker-level view: a same-path bind, or a tmpfs shadow.
@@ -58,8 +64,9 @@ impl Mount {
             // an empty directory it needs no host path to point at. Docker's --tmpfs
             // defaults (rw,noexec,nosuid,nodev) are what a hidden dir wants; `mode` is
             // pinned explicitly for the same reason `run`'s $HOME tmpfs pins it — so the
-            // result never depends on which uid the container happens to run as.
-            Kind::Hide => MountArg::Tmpfs(Tmpfs::new(&self.path, "mode=0755")),
+            // result never depends on which uid the container happens to run as — and it is
+            // the *host's* mode, so hiding a directory never widens it.
+            Kind::Hide(mode) => MountArg::Tmpfs(Tmpfs::new(&self.path, &mode_opt(mode))),
         }
     }
 }
@@ -128,6 +135,14 @@ impl MountArg {
     }
 }
 
+/// A `--tmpfs` `mode=` option from a host `st_mode`, masked to the permission bits.
+///
+/// Always leading-zero, so the value reads as octal at a glance and a setgid directory
+/// renders `mode=02775` rather than a `2775` that looks decimal.
+pub fn mode_opt(mode: u32) -> String {
+    format!("mode=0{:o}", mode & 0o7777)
+}
+
 /// Canonicalize a user-supplied path (realpath); errors if it does not exist,
 /// since a same-path bind mount of a missing host path is always a mistake.
 ///
@@ -146,7 +161,12 @@ pub fn canonicalize(p: &Path) -> Result<PathBuf> {
 ///
 /// Directories only. `--tmpfs` cannot shadow a file, and quietly doing nothing for one
 /// would be a silent hole in something people reach for to hide secrets.
-pub fn resolve_hide(p: &Path) -> Result<Option<PathBuf>> {
+///
+/// Returns the host mode alongside the path: the `stat` that proves the path is a directory
+/// already carries it, so mirroring it onto the shadow costs no extra syscall.
+pub fn resolve_hide(p: &Path) -> Result<Option<(PathBuf, u32)>> {
+    use std::os::unix::fs::MetadataExt;
+
     let meta = match std::fs::metadata(p) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -159,7 +179,7 @@ pub fn resolve_hide(p: &Path) -> Result<Option<PathBuf>> {
         );
     }
     // Canonical because seatbelt matches the *resolved* path — see `seatbelt.rs`.
-    Ok(Some(canonicalize(p)?))
+    Ok(Some((canonicalize(p)?, meta.mode())))
 }
 
 /// Order mounts parent-before-child so nested holes apply correctly regardless of
@@ -183,7 +203,23 @@ mod tests {
     fn flatten_renders_each_kind() {
         assert_eq!(Mount::ro("/a".into()).flatten().to_args(), ["-v", "/a:/a:ro"]);
         assert_eq!(Mount::rw("/a".into()).flatten().to_args(), ["-v", "/a:/a"]);
-        assert_eq!(Mount::hide("/a".into()).flatten().to_args(), ["--tmpfs", "/a:mode=0755"]);
+        assert_eq!(
+            Mount::hide("/a".into(), 0o755).flatten().to_args(),
+            ["--tmpfs", "/a:mode=0755"]
+        );
+    }
+
+    /// The shadow takes the host's mode, so hiding a 0700 credential dir never leaves it
+    /// world-readable inside — a fabricated 0755 would have *widened* it.
+    #[test]
+    fn a_hidden_dir_keeps_the_hosts_mode() {
+        assert_eq!(
+            Mount::hide("/a".into(), 0o700).flatten().to_args(),
+            ["--tmpfs", "/a:mode=0700"]
+        );
+        // Full `st_mode` in, permission bits out — and a setgid bit survives the round trip.
+        assert_eq!(mode_opt(0o040751), "mode=0751");
+        assert_eq!(mode_opt(0o2775), "mode=02775");
     }
 
     /// The escape hatch for the few mounts whose destination legitimately differs.

@@ -72,8 +72,8 @@ fn assemble_mounts(
     }
     for p in &args.hide {
         // Missing is a no-op rather than an error — see `mounts::resolve_hide`.
-        if let Some(p) = mounts::resolve_hide(p)? {
-            mounts.push(Mount::hide(p));
+        if let Some((p, mode)) = mounts::resolve_hide(p)? {
+            mounts.push(Mount::hide(p, mode));
         }
     }
 
@@ -594,13 +594,23 @@ mod tests {
     /// `--hide` on a path some default already mounts silently does nothing.
     #[test]
     fn dedupe_is_last_wins_across_kinds() {
-        let mut m = vec![Mount::rw("/a".into()), Mount::hide("/a".into())];
+        let mut m = vec![Mount::rw("/a".into()), Mount::hide("/a".into(), 0o700)];
         dedupe(&mut m);
-        assert_eq!(m, vec![Mount::hide("/a".into())], "hide beats an earlier rw");
+        assert_eq!(m, vec![Mount::hide("/a".into(), 0o700)], "hide beats an earlier rw");
 
-        let mut m = vec![Mount::hide("/a".into()), Mount::ro("/a".into())];
+        let mut m = vec![Mount::hide("/a".into(), 0o700), Mount::ro("/a".into())];
         dedupe(&mut m);
         assert_eq!(m, vec![Mount::ro("/a".into())], "and is itself overridable");
+    }
+
+    /// What `dedupe`'s "copy the *whole* kind" comment is about, now that a kind carries
+    /// more than read-only-ness: keeping the variant but not its payload would silently
+    /// leave the earlier mode in place.
+    #[test]
+    fn dedupe_replaces_the_kinds_payload_too() {
+        let mut m = vec![Mount::hide("/a".into(), 0o755), Mount::hide("/a".into(), 0o700)];
+        dedupe(&mut m);
+        assert_eq!(m, vec![Mount::hide("/a".into(), 0o700)]);
     }
 
     #[cfg(target_os = "linux")]
