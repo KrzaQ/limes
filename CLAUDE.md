@@ -55,8 +55,16 @@ These are load-bearing; breaking one silently defeats the tool.
   need a different destination (SSH/GPG sockets, the docker socket) build their `-v` args by
   hand in `run.rs`.
 - **Never `--privileged`.** The container runs with `--read-only` rootfs, `--cap-drop ALL`,
-  `no-new-privileges`, seccomp on, as the invoking uid:gid, with tmpfs `/tmp` and tmpfs
-  `$HOME`.
+  `no-new-privileges`, seccomp on, with tmpfs `/tmp` and tmpfs `$HOME`.
+- **`-u 0:0`, and that *is* the invoking user.** The rootless daemon's user namespace maps
+  the invoking user to container uid 0; container uids 1.. come from the subuid range and own
+  none of the host's files. Passing `-u {uid}:{gid}` therefore yields a sandbox where the
+  workspace, `~/.claude` and every 0700 dotfile are unreadable and unwritable — it looks
+  right and is completely broken. `identity.rs` generates the `/etc/passwd` and `/etc/group`
+  that make uid 0 resolve to the user's real name, home and login shell, and those two are
+  the only mounts whose destination differs from their source. This is safe *only* because
+  every docker call is pinned to limes' own rootless daemon; `doctor`'s `rootless` check is
+  what guards it, and a Fail there means real root.
 - **Credentials are forwarded as oracles, never as key material**: the SSH agent socket, the
   GPG *extra* (restricted) socket, the rosa broker socket, `~/.gitconfig` ro. Don't mount
   `~/.ssh`, `~/.gnupg`, or rosa's encrypted store (`~/.secrets.json.gpg`, named by

@@ -28,6 +28,12 @@ mod status;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod seatbelt;
 
+// Makes container uid 0 present as the invoking user. Only the Linux backend needs it —
+// macOS has no uid translation to undo — but it is pure string work, so it stays compiled
+// and tested everywhere for the same reason `seatbelt` does.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod identity;
+
 // Forward resolution is shared; only the docker `-v` emission is Linux-shaped.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod forward;

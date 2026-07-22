@@ -132,6 +132,20 @@ pub fn doctor(ctx: &Context) -> Result<()> {
         r.add(Health::Fail, "daemon", "unreachable on the limes socket");
     }
 
+    // Load-bearing, not informational: `run` passes `-u 0:0` because the rootless mapping
+    // makes container uid 0 the invoking user. Against a rootful daemon that same flag is
+    // real root with the host's whole filesystem one `-v` away, so if this ever reports
+    // Fail, stop using the sandbox rather than trusting it.
+    match docker::daemon_rootless(ctx) {
+        Some(true) => r.add(Health::Ok, "rootless", "daemon runs in a user namespace"),
+        Some(false) => r.add(
+            Health::Fail,
+            "rootless",
+            "daemon is NOT rootless — `lim run` uses -u 0:0 and would be real root here",
+        ),
+        None => r.add(Health::Warn, "rootless", "could not determine (daemon unreachable?)"),
+    }
+
     // ── Image ───────────────────────────────────────────────────────
     if docker::image_present(ctx) {
         r.add(Health::Ok, "image", IMAGE_TAG);

@@ -39,6 +39,22 @@ pub fn daemon_alive(ctx: &Context) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the limes daemon is running rootless, or `None` if it could not be asked.
+///
+/// `run` passes `-u 0:0` on the strength of this: rootless means container uid 0 is the
+/// invoking user, rootful means it is actually root. `docker info` lists `rootless` among
+/// its security options.
+pub fn daemon_rootless(ctx: &Context) -> Option<bool> {
+    let out = command(ctx)
+        .args(["info", "--format", "{{range .SecurityOptions}}{{println .}}{{end}}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).contains("rootless"))
+}
+
 /// True if the limes image is present on the limes daemon.
 pub fn image_present(ctx: &Context) -> bool {
     command(ctx)

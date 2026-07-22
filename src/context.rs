@@ -46,6 +46,17 @@ impl Context {
         format!("unix://{}", self.socket().display())
     }
 
+    /// Generated `/etc/passwd` and `/etc/group`, presenting container uid 0 as the invoking
+    /// user (see `identity.rs`). They sit beside the socket in `$XDG_RUNTIME_DIR` — per-user
+    /// tmpfs, so they never outlive the login session — and are rewritten on every run.
+    pub fn passwd_file(&self) -> PathBuf {
+        self.xdg_runtime_dir.join("limes-passwd")
+    }
+
+    pub fn group_file(&self) -> PathBuf {
+        self.xdg_runtime_dir.join("limes-group")
+    }
+
     /// Dedicated data-root, so cleanup/prune only ever touches limes's own subtree,
     /// never images or volumes from any other Docker daemon.
     pub fn data_root(&self) -> PathBuf {

@@ -14,12 +14,14 @@ use std::process::Command;
 
 use anyhow::Result;
 #[cfg(target_os = "linux")]
-use anyhow::bail;
+use anyhow::{Context as _, bail};
 
 use crate::RunArgs;
 use crate::agents;
 use crate::config;
 use crate::context::Context;
+#[cfg(target_os = "linux")]
+use crate::identity;
 use crate::mounts::{self, Mount};
 
 #[cfg(target_os = "linux")]
@@ -91,9 +93,31 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     cmd.arg("run").arg("--rm").arg("-it");
 
     // Identity: run as the human, with a matching HOME.
-    cmd.args(["-u", &format!("{}:{}", ctx.uid, ctx.gid)]);
+    //
+    // `-u 0:0` is that human, not root. The rootless daemon's user namespace maps the
+    // invoking user to container uid 0; container uids 1.. come from the subuid range and
+    // own none of the host's files, so `-u {uid}:{gid}` produces a sandbox where the
+    // workspace, `~/.claude` and every 0700 dotfile are unreadable and unwritable. Do not
+    // "fix" this back. It is safe only because `docker::command` pins every call to limes'
+    // own rootless daemon — against a rootful one this would be real root, which is what
+    // `doctor`'s rootless check guards. --cap-drop/no-new-privileges/read-only still apply.
+    cmd.args(["-u", "0:0"]);
     cmd.args(["-e", &format!("HOME={}", ctx.home.display())]);
     cmd.args(["-w", &path_str(&workspace)]);
+
+    // ...and uid 0 has to *look* like the human, or `whoami` says root and every mounted
+    // file lists as root. These are the only mounts whose destination differs from their
+    // source, so — like the gpg and docker sockets in `forward.rs` — they are raw `-v` args
+    // rather than `Mount`s, which model same-path binds only.
+    std::fs::write(
+        ctx.passwd_file(),
+        identity::passwd(&read_etc("/etc/passwd"), ctx.uid, &ctx.home),
+    )
+    .with_context(|| format!("writing {}", ctx.passwd_file().display()))?;
+    std::fs::write(ctx.group_file(), identity::group(&read_etc("/etc/group"), ctx.gid))
+        .with_context(|| format!("writing {}", ctx.group_file().display()))?;
+    cmd.args(["-v", &format!("{}:/etc/passwd:ro", ctx.passwd_file().display())]);
+    cmd.args(["-v", &format!("{}:/etc/group:ro", ctx.group_file().display())]);
 
     // Marker so shells/scripts/tooling inside can tell they're in a limes sandbox:
     // presence means "inside limes", value is the version. It's the crate version, so
@@ -109,12 +133,12 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     // Writable, ephemeral scratch: /tmp and an empty HOME the shell can write to.
     // The bind mounts below layer real dotfiles/state on top of the HOME tmpfs.
     //
-    // `mode=1777` is load-bearing, not decoration. A tmpfs defaults to 1777, but when `-w`
-    // names a path *inside* it — which it does whenever the workspace lives under $HOME —
-    // Docker creates that directory chain and leaves the tmpfs root root-owned 0755. The
-    // container then runs as the invoking uid and cannot write its own $HOME, which breaks
-    // the symlink prelude below and anything else that writes there. Setting the mode
-    // explicitly survives that. Matches /tmp, which the image already chmods to 1777.
+    // `mode=1777` is belt-and-braces. A tmpfs defaults to 1777, but when `-w` names a path
+    // *inside* it — which it does whenever the workspace lives under $HOME — Docker creates
+    // that directory chain and leaves the tmpfs root owned by uid 0 at 0755. That is
+    // harmless while we run as uid 0, but it silently breaks the symlink prelude below (and
+    // anything else writing to $HOME) the moment the container user is anyone else. Keep it
+    // pinned so the mode never depends on the uid. Matches /tmp, which the image chmods.
     cmd.args(["--tmpfs", "/tmp:exec"]);
     cmd.args(["--tmpfs", &format!("{}:exec,mode=1777", ctx.home.display())]);
 
@@ -221,6 +245,13 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     Err(cmd.exec().into())
 }
 
+/// Read one of the host's `/etc` identity files. An unreadable one is not fatal: `identity`
+/// falls back to a synthesised entry, which beats refusing to start the sandbox.
+#[cfg(target_os = "linux")]
+fn read_etc(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
 /// Host-userland mirror + the `/etc` handful + non-shell credential/state files. Shell
 /// rc files are deliberately not here — they arrive via the dotfiles `config.d` drop-in,
 /// which recreates their symlinks so self-locating config resolves correctly. This keeps
@@ -234,7 +265,10 @@ fn default_mounts(ctx: &Context) -> Vec<Mount> {
     m.push(Mount::ro("/usr".into()));
 
     // The /etc handful — never /etc wholesale (Docker owns resolv.conf/hosts).
-    for p in ["/etc/passwd", "/etc/group", "/etc/ssl", "/etc/ld.so.cache", "/etc/localtime"] {
+    // `passwd`/`group` are deliberately absent: `run` mounts generated ones instead, so that
+    // container uid 0 resolves to the invoking user. The trade is that files owned by *other*
+    // host users render as bare numeric uids inside, which is the lesser confusion.
+    for p in ["/etc/ssl", "/etc/ld.so.cache", "/etc/localtime"] {
         let p = Path::new(p);
         if p.exists() {
             m.push(Mount::ro(p.into()));

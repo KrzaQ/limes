@@ -1,0 +1,119 @@
+//! Make container uid 0 present as the invoking user.
+//!
+//! Under the dedicated rootless daemon the user-namespace mapping is fixed by rootlesskit:
+//! the invoking user is container uid **0**, and container uids 1.. come from the subuid
+//! range and own nothing. So uid 0 is the only identity that can read and write the host's
+//! own files, which is why `run.rs` passes `-u 0:0` (see the comment there).
+//!
+//! The cost is cosmetic but pervasive: `whoami` says `root`, and every mounted host file
+//! lists as `root`, because the container resolves uid 0 through the mirrored `/etc/passwd`.
+//! Rewriting the host's *own* entry so the user sits at uid 0 restores the mirror — same
+//! name, same gecos, same home, same login shell — and keeps the sandbox feeling like the
+//! host rather than like a root shell.
+//!
+//! Deriving from the host lines rather than synthesising them is deliberate: the login
+//! shell in particular must match, or a login shell inside the sandbox is not the one the
+//! user actually runs.
+
+use std::path::Path;
+
+/// Some tooling expects `nobody` to resolve; the host's own entry is not mirrored, since
+/// its uid means nothing under the rootless mapping.
+const NOBODY_PASSWD: &str = "nobody:x:65534:65534:nobody:/:/usr/bin/nologin";
+const NOBODY_GROUP: &str = "nobody:x:65534:";
+
+/// The `/etc/passwd` to mount: the invoking user's own line, moved to uid/gid 0.
+///
+/// `home` is only consulted for the fallback line, for the pathological case of a host with
+/// no passwd entry for its own uid (NSS-only directories, a broken container image).
+pub fn passwd(host_passwd: &str, uid: u32, home: &Path) -> String {
+    let line = find(host_passwd, 2, uid)
+        .and_then(|l| rewrite(l, &[2, 3], "0"))
+        .unwrap_or_else(|| fallback_passwd(home));
+    format!("{line}\n{NOBODY_PASSWD}\n")
+}
+
+/// The `/etc/group` to mount: the invoking user's own primary group, moved to gid 0.
+pub fn group(host_group: &str, gid: u32) -> String {
+    let line = find(host_group, 2, gid)
+        .and_then(|l| rewrite(l, &[2], "0"))
+        .unwrap_or_else(|| format!("{}:x:0:", user_name()));
+    format!("{line}\n{NOBODY_GROUP}\n")
+}
+
+/// The first line whose `field`-th colon-separated column parses as `id`.
+fn find(text: &str, field: usize, id: u32) -> Option<&str> {
+    text.lines().find(|l| l.split(':').nth(field).and_then(|f| f.parse::<u32>().ok()) == Some(id))
+}
+
+/// Replace each of `fields` with `value`, keeping every other column intact. `None` if the
+/// line is too short to hold them — a malformed entry is not worth guessing at.
+fn rewrite(line: &str, fields: &[usize], value: &str) -> Option<String> {
+    let mut cols: Vec<&str> = line.split(':').collect();
+    for &f in fields {
+        *cols.get_mut(f)? = value;
+    }
+    Some(cols.join(":"))
+}
+
+fn fallback_passwd(home: &Path) -> String {
+    let name = user_name();
+    format!("{name}:x:0:0:{name}:{}:/bin/sh", home.display())
+}
+
+fn user_name() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "limes".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const HOST_PASSWD: &str = "root:x:0:0::/root:/usr/bin/bash\n\
+                               krzaq:x:1000:1000:Krzaq:/home/krzaq:/usr/bin/zsh\n\
+                               nobody:x:65534:65534:Nobody:/:/usr/bin/nologin";
+    const HOST_GROUP: &str = "root:x:0:\nkrzaq:x:1000:\nwheel:x:998:krzaq";
+
+    /// The whole point: uid and gid become 0 while name, gecos, home and — critically —
+    /// the login shell survive untouched.
+    #[test]
+    fn passwd_moves_the_user_to_uid_zero_keeping_shell_and_home() {
+        let out = passwd(HOST_PASSWD, 1000, Path::new("/home/krzaq"));
+        assert!(out.starts_with("krzaq:x:0:0:Krzaq:/home/krzaq:/usr/bin/zsh\n"), "{out}");
+        assert!(out.contains(NOBODY_PASSWD));
+    }
+
+    /// The host's own `root` line must not survive: two uid-0 entries make `getpwuid(0)`
+    /// order-dependent, and the wrong winner puts the sandbox back to `whoami == root`.
+    #[test]
+    fn passwd_does_not_carry_the_hosts_root_line() {
+        let out = passwd(HOST_PASSWD, 1000, Path::new("/home/krzaq"));
+        assert!(!out.contains("root:x:"), "{out}");
+    }
+
+    #[test]
+    fn group_moves_the_primary_group_to_gid_zero() {
+        let out = group(HOST_GROUP, 1000);
+        assert!(out.starts_with("krzaq:x:0:\n"), "{out}");
+        assert!(out.contains(NOBODY_GROUP));
+    }
+
+    /// A uid with no passwd entry still has to yield a usable file, or the sandbox has no
+    /// resolvable identity at all.
+    #[test]
+    fn passwd_falls_back_when_the_uid_is_absent() {
+        let out = passwd(HOST_PASSWD, 4242, &PathBuf::from("/home/someone"));
+        let first = out.lines().next().unwrap();
+        assert_eq!(first.split(':').nth(2), Some("0"));
+        assert_eq!(first.split(':').nth(5), Some("/home/someone"));
+    }
+
+    /// A truncated line is left to the fallback rather than being silently half-rewritten.
+    #[test]
+    fn malformed_line_falls_back() {
+        let out = passwd("broken:x:1000", 1000, Path::new("/home/krzaq"));
+        let first = out.lines().next().unwrap();
+        assert_eq!(first.split(':').count(), 7, "fallback is a full 7-field entry: {first}");
+    }
+}
