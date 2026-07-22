@@ -361,17 +361,59 @@ fn dedupe(mounts: &mut Vec<Mount>) {
     *mounts = out;
 }
 
+/// Cap on a generated container name. Self-imposed — Docker names have no meaningful
+/// length limit — and it exists so `lim status` stays scannable.
+#[cfg(target_os = "linux")]
+const NAME_MAX: usize = 64;
+
+/// Container name from the **whole** workspace path, not its basename.
+///
+/// `~/a/test` and `~/b/test` would otherwise both be `limes-test`. Today that surfaces as a
+/// confusing Docker name conflict; once `lim` joins a running sandbox it would silently drop
+/// you into a sandbox for a *different tree*, mounted read-write.
+///
+/// A name that is a total function of the path *is* the lookup — `docker inspect <name>`
+/// either hits or it does not — so joining needs no `docker ps --filter label=…` scan.
+/// `current_dir()` is `getcwd(3)`, already kernel-resolved, so no symlink component survives
+/// into the name; two paths aliasing one directory are deliberately out of scope.
+///
+/// Sanitising flattens `/a/b-c` and `/a-b/c` onto the same name. That collision is accepted
+/// and caught downstream by asserting the `limes.workspace` label after the lookup.
 #[cfg(target_os = "linux")]
 fn derive_name(workspace: &Path) -> String {
-    let base = workspace
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "root".into());
-    let sanitized: String = base
+    let raw = workspace.to_string_lossy();
+    // Non-alphanumerics to `-`; the `limes-` prefix then satisfies Docker's
+    // `[a-zA-Z0-9][a-zA-Z0-9_.-]*` leading-character rule for free.
+    let sanitized: String = raw
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
-    format!("limes-{}", sanitized.trim_matches('-'))
+    let body = sanitized.trim_matches('-');
+    if body.is_empty() {
+        return "limes-root".into(); // `/`
+    }
+    if body.len() + "limes-".len() <= NAME_MAX {
+        return format!("limes-{body}");
+    }
+    // Truncate the *front* and append a hash of the full path. The tail is the
+    // recognizable part, and truncating the tail instead would collide exactly where
+    // paths are most similar — sibling directories.
+    let keep = NAME_MAX - "limes-".len() - 1 - 8;
+    let tail: String = body.chars().skip(body.chars().count() - keep).collect();
+    format!("limes-{}-{:08x}", tail.trim_start_matches('-'), fnv1a(&raw) as u32)
+}
+
+/// FNV-1a, inline and deliberately not `DefaultHasher`: the std hasher is documented as
+/// unstable across Rust releases, so a toolchain upgrade would silently rename every
+/// long-path sandbox and orphan the containers already running under the old names.
+#[cfg(target_os = "linux")]
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 #[cfg(target_os = "linux")]
@@ -454,7 +496,55 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn derive_name_sanitizes_workspace() {
-        assert_eq!(derive_name(Path::new("/home/u/my.proj")), "limes-my-proj");
+    fn derive_name_sanitizes_the_whole_path() {
+        assert_eq!(derive_name(Path::new("/home/u/my.proj")), "limes-home-u-my-proj");
+    }
+
+    /// The reason the name is the whole path: sibling trees with the same basename must
+    /// not share a sandbox, or joining hands you someone else's tree mounted read-write.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn derive_name_distinguishes_equal_basenames() {
+        assert_ne!(
+            derive_name(Path::new("/home/u/a/test")),
+            derive_name(Path::new("/home/u/b/test"))
+        );
+    }
+
+    /// Flattening non-alphanumerics means these two *do* collide. Asserted so the
+    /// limitation is documented rather than discovered — the `limes.workspace` label
+    /// assertion after the lookup is what turns it into an error instead of a silent join.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn derive_name_flattening_collision_is_known() {
+        assert_eq!(derive_name(Path::new("/a/b-c")), derive_name(Path::new("/a-b/c")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn derive_name_falls_back_at_the_root() {
+        assert_eq!(derive_name(Path::new("/")), "limes-root");
+    }
+
+    /// Truncation must stay bounded, keep the recognizable tail, be a pure function of the
+    /// path, and still tell apart two paths that differ only in the part it cut off.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn derive_name_truncates_long_paths_with_a_hash() {
+        let long =
+            Path::new("/home/u/very/deeply/nested/monorepo/services/backend/api/handlers/v2");
+        let n = derive_name(long);
+        assert!(n.len() <= NAME_MAX, "{n} is {} chars", n.len());
+        assert!(n.starts_with("limes-"));
+        assert!(n.contains("handlers-v2"), "the tail is the recognizable part: {n}");
+        assert_eq!(n, derive_name(long), "must be deterministic");
+
+        let sibling =
+            Path::new("/home/u/very/deeply/nested/monorepo/services/frontend/api/handlers/v2");
+        assert_ne!(
+            n,
+            derive_name(sibling),
+            "differing only in the truncated head must still differ"
+        );
     }
 }
