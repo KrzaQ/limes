@@ -141,6 +141,8 @@ ssh    = true    # SSH agent socket           (default: on)
 gpg    = false   # GPG extra agent socket     (default: on)
 rosa   = true    # sub rosa broker + client   (default: on)
 docker = false   # the limes docker socket    (default: on)
+
+gpg_unrestricted = true   # S.gpg-agent instead of S.gpg-agent.extra  (default: off)
 ```
 
 All four are on by default and each no-ops silently when the thing it forwards isn't there,
@@ -149,6 +151,16 @@ of flags — `--gpg` / `--no-gpg`, `--docker` / `--no-docker`, and so on — and
 over config in *both* directions, so a standing `gpg = false` is still escapable with
 `--gpg` for a single run. `docker = false` drops the socket *and* `DOCKER_HOST`, so nothing
 inside is left pointing at a socket that isn't there.
+
+`gpg_unrestricted` (`--gpg-unrestricted`) is the one switch here that defaults *off*. The
+extra socket asks pinentry to confirm every use of a key, and that confirmation is what
+makes handing a sandbox your signing key reasonable. But gpg-agent will not trust a
+client-supplied tty for it, so with a tty-only `pinentry-program` there is nowhere to draw
+the prompt and every signature fails with `Operation cancelled` — cached passphrase or not,
+and identically from the host over that same socket. Where a graphical pinentry isn't an
+option, this switch is the difference between signing from a sandbox and not. It costs
+exactly this: while the passphrase is cached, anything inside can sign as you unprompted.
+The key itself still never enters the sandbox.
 
 The generated **system gitconfig** (see *What it does*) has the same shape of switch:
 

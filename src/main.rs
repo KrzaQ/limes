@@ -186,6 +186,16 @@ pub struct RunArgs {
     /// Do not forward the GPG agent socket
     #[arg(long = "no-gpg", overrides_with = "gpg")]
     pub no_gpg: bool,
+    // Off by default, unlike the forwards around it: the restricted socket is the one
+    // that keeps a sandbox from using your key without asking, so trading that away has
+    // to be something you said, not something you got.
+    /// Forward the *unrestricted* GPG agent socket, so a cached key signs without a
+    /// per-use confirmation
+    #[arg(long = "gpg-unrestricted", overrides_with = "no_gpg_unrestricted")]
+    pub gpg_unrestricted: bool,
+    /// Forward the restricted GPG socket, which confirms every key use (default)
+    #[arg(long = "no-gpg-unrestricted", overrides_with = "gpg_unrestricted")]
+    pub no_gpg_unrestricted: bool,
     /// Forward the rosa secret-broker socket and client (default)
     #[arg(long = "rosa", overrides_with = "no_rosa")]
     pub rosa: bool,

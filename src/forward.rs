@@ -24,6 +24,8 @@ use crate::util::find_in_path;
 pub struct Forwards {
     pub ssh: bool,
     pub gpg: bool,
+    /// Hand over `S.gpg-agent` instead of the restricted `S.gpg-agent.extra`.
+    pub gpg_unrestricted: bool,
     pub rosa: bool,
     pub docker: bool,
 }
@@ -35,6 +37,11 @@ impl Forwards {
         Self {
             ssh: enabled(tri(args.ssh, args.no_ssh), cfg.ssh),
             gpg: enabled(tri(args.gpg, args.no_gpg), cfg.gpg),
+            // The only switch here that defaults off — giving away the confirmation is a
+            // decision, not a default.
+            gpg_unrestricted: tri(args.gpg_unrestricted, args.no_gpg_unrestricted)
+                .or(cfg.gpg_unrestricted)
+                .unwrap_or(false),
             rosa: enabled(tri(args.rosa, args.no_rosa), cfg.rosa),
             docker: enabled(tri(args.docker, args.no_docker), cfg.docker),
         }
@@ -120,7 +127,7 @@ pub fn pieces(ctx: &Context, f: &Forwards) -> Pieces {
         add_ssh_agent(&mut p);
     }
     if f.gpg {
-        add_gpg_agent(&mut p, ctx);
+        add_gpg_agent(&mut p, ctx, f.gpg_unrestricted);
     }
     if f.rosa {
         add_rosa_env(&mut p, ctx);
@@ -142,10 +149,21 @@ fn add_ssh_agent(p: &mut Pieces) {
     }
 }
 
-/// Forward the GPG *extra* (restricted) socket onto the container's normal agent
-/// socket path, plus the keyring files read-only. Secret keys stay in the host agent.
-fn add_gpg_agent(p: &mut Pieces, ctx: &Context) {
-    let Some(extra) = gpgconf_dir("agent-extra-socket") else {
+/// Forward a GPG agent socket onto the container's normal agent socket path, plus the
+/// keyring files read-only. Secret keys stay in the host agent either way.
+///
+/// `unrestricted` picks `S.gpg-agent` over `S.gpg-agent.extra`. The extra socket confirms
+/// every use of a key through pinentry, which is the guard that makes forwarding it to a
+/// sandbox reasonable — but gpg-agent will not trust a *client-supplied* tty for that
+/// confirmation, so a tty-only pinentry has nowhere to draw it and every signature fails
+/// with `Operation cancelled`, cached passphrase or not. On such a host the choice is
+/// between this switch and not signing from a sandbox at all.
+///
+/// What it costs is exact: for as long as the passphrase is cached, anything in the
+/// sandbox can sign as you without being asked. The key itself still never enters.
+fn add_gpg_agent(p: &mut Pieces, ctx: &Context, unrestricted: bool) {
+    let which = if unrestricted { "agent-socket" } else { "agent-extra-socket" };
+    let Some(extra) = gpgconf_dir(which) else {
         return;
     };
     if !Path::new(&extra).exists() {

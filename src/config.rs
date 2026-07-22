@@ -70,6 +70,9 @@ pub struct Config {
 pub struct Forward {
     pub ssh: Option<bool>,
     pub gpg: Option<bool>,
+    /// Forward `S.gpg-agent` rather than `S.gpg-agent.extra`. Defaults to *off*, unlike
+    /// every other switch here — see `RunArgs::gpg_unrestricted`.
+    pub gpg_unrestricted: Option<bool>,
     pub rosa: Option<bool>,
     pub docker: Option<bool>,
 }
@@ -80,6 +83,7 @@ impl Forward {
     fn merge(&mut self, other: Forward) {
         self.ssh = other.ssh.or(self.ssh);
         self.gpg = other.gpg.or(self.gpg);
+        self.gpg_unrestricted = other.gpg_unrestricted.or(self.gpg_unrestricted);
         self.rosa = other.rosa.or(self.rosa);
         self.docker = other.docker.or(self.docker);
     }

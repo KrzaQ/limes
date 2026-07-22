@@ -60,6 +60,14 @@
 # gpg    = false   # GPG extra (restricted) agent socket
 # rosa   = true    # sub rosa secret broker: socket + client binary
 # docker = false   # the limes docker socket (also drops DOCKER_HOST)
+#
+# The exception to "all default on": gpg_unrestricted forwards S.gpg-agent instead of
+# S.gpg-agent.extra, and defaults OFF. The extra socket confirms every use of a key through
+# pinentry -- but gpg-agent won't trust a client-supplied tty for that prompt, so a
+# pinentry-tty host cannot display it and signing inside always fails with "Operation
+# cancelled", cached passphrase or not. Turning this on trades that confirmation away: while
+# the passphrase is cached, anything in the sandbox can sign as you without being asked.
+# gpg_unrestricted = true
 
 # The sandbox gets its own *system* gitconfig setting `core.checkStat = minimal`, because
 # inside you are container uid 0 while the index on disk records your real uid — and git's
