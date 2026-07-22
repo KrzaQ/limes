@@ -89,15 +89,15 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
 
     // ── 3. systemd user unit for the dedicated rootless daemon ──────
     let unit_path = ctx.service_file();
-    let unit = render_unit();
+    let unit = unit_file();
     if dry {
-        println!("would write {}:\n{}", unit_path.display(), indent(&unit));
+        println!("would write {}:\n{}", unit_path.display(), indent(unit));
     } else {
         std::fs::create_dir_all(unit_path.parent().unwrap())
             .with_context(|| format!("creating {}", unit_path.parent().unwrap().display()))?;
         std::fs::create_dir_all(ctx.data_root())
             .with_context(|| format!("creating data-root {}", ctx.data_root().display()))?;
-        std::fs::write(&unit_path, &unit)
+        std::fs::write(&unit_path, unit)
             .with_context(|| format!("writing {}", unit_path.display()))?;
         println!("wrote {}", unit_path.display());
     }
@@ -148,9 +148,11 @@ fn missing_prereqs() -> Vec<String> {
 
 /// The systemd **user** unit — dedicated data-root and socket, mirroring Docker's
 /// official rootless unit but namespaced to limes.
-fn render_unit() -> String {
-    format!(
-        "[Unit]\n\
+///
+/// Nothing here is interpolated by us: `%h` and `%t` are systemd's own specifiers, which is
+/// why this is a constant rather than a format string.
+fn unit_file() -> &'static str {
+    "[Unit]\n\
          Description=limes dedicated rootless Docker daemon\n\
          Documentation=https://docs.docker.com/go/rootless/\n\
          After=network-online.target\n\
@@ -176,7 +178,6 @@ fn render_unit() -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n"
-    )
 }
 
 fn systemd(dry: bool, args: &[&str]) -> Result<()> {

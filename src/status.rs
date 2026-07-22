@@ -54,7 +54,7 @@ pub fn status(ctx: &Context) -> Result<()> {
     // invocation that *created* the sandbox and says nothing about the shells in it now —
     // the label is kept (status/stop/prune key off the schema) but it is no longer honest
     // to present it as describing the sandbox. The shell count is the interesting number.
-    println!("{:<40} {:>6} {:<24} {}", "NAME", "SHELLS", "STATUS", "WORKSPACE");
+    println!("{:<40} {:>6} {:<24} WORKSPACE", "NAME", "SHELLS", "STATUS");
     for r in &rows {
         let workspace = r.label(&format!("{LABEL}.workspace"));
         println!(
