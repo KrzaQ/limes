@@ -140,25 +140,53 @@ fn add_ssh_agent(p: &mut Pieces) {
 }
 
 /// Forward the GPG *extra* (restricted) socket onto the container's normal agent
-/// socket path, plus the public keyring read-only. Secret keys stay in the host agent.
+/// socket path, plus the keyring files read-only. Secret keys stay in the host agent.
 fn add_gpg_agent(p: &mut Pieces, ctx: &Context) {
-    let Ok(out) = Command::new("gpgconf").args(["--list-dir", "agent-extra-socket"]).output()
-    else {
+    let Some(extra) = gpgconf_dir("agent-extra-socket") else {
         return;
     };
-    if !out.status.success() {
-        return;
-    }
-    let extra = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if extra.is_empty() || !Path::new(&extra).exists() {
+    if !Path::new(&extra).exists() {
         return;
     }
     let dest = format!("/run/user/{}/gnupg/S.gpg-agent", ctx.uid);
     p.binds.push(Bind::new(extra, dest, false));
-    let pubring = ctx.home.join(".gnupg/pubring.kbx");
-    if pubring.exists() {
-        p.binds.push(Bind::same_path(&pubring, true));
+    // Ask gpg where it lives rather than assuming `~/.gnupg`, so `$GNUPGHOME` is honored —
+    // we are already shelling out to `gpgconf` for the socket, so this costs one more call.
+    // The fallback keeps the old behaviour for a gpg too old to answer.
+    let homedir =
+        gpgconf_dir("homedir").map(PathBuf::from).unwrap_or_else(|| ctx.home.join(".gnupg"));
+    p.binds.extend(gnupg_binds(&homedir));
+}
+
+/// One `gpgconf --list-dir` entry, or `None` if gpg cannot be asked.
+fn gpgconf_dir(key: &str) -> Option<String> {
+    let out = Command::new("gpgconf").args(["--list-dir", key]).output().ok()?;
+    if !out.status.success() {
+        return None;
     }
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if dir.is_empty() { None } else { Some(dir) }
+}
+
+/// The files from a gpg homedir worth binding read-only, skipping any that are absent.
+///
+/// **Neither is key material**, so the oracle rule is intact: `pubring.kbx` is public by
+/// definition, and `trustdb.gpg` holds ownertrust *assignments* — the same class. Without
+/// the trustdb every signature verifies but reports unknown validity, so
+/// `git log --format=%G?` is uniformly `U`, and a status that never varies is a status
+/// nobody reads.
+///
+/// Mounting the trustdb read-only costs `gpg: Note: trustdb not writable` on verbose
+/// operations. A note, not an error — and a write to a trustdb inside an ephemeral sandbox
+/// would be meaningless anyway. If it ever grates, copy it into `$XDG_RUNTIME_DIR` and bind
+/// *that* writable, exactly as `identity.rs` does for the generated `/etc/passwd`.
+fn gnupg_binds(homedir: &Path) -> Vec<Bind> {
+    ["pubring.kbx", "trustdb.gpg"]
+        .iter()
+        .map(|f| homedir.join(f))
+        .filter(|p| p.exists())
+        .map(|p| Bind::same_path(&p, true))
+        .collect()
 }
 
 /// Point the client at the socket explicitly. The container sets no `XDG_RUNTIME_DIR`, so
@@ -201,6 +229,30 @@ mod tests {
     fn cli_overrides_config_both_ways() {
         assert!(enabled(Some(true), Some(false)));
         assert!(!enabled(Some(false), Some(true)));
+    }
+
+    /// Each file rides on its own existence, so a host with no trustdb is unaffected and one
+    /// with a trustdb stops reporting every signature as unknown-validity.
+    #[test]
+    fn gnupg_binds_take_whichever_files_exist() {
+        let dir = std::env::temp_dir().join(format!("limes-gnupg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp homedir");
+
+        assert!(gnupg_binds(&dir).is_empty(), "an empty homedir mounts nothing");
+
+        std::fs::write(dir.join("pubring.kbx"), "").unwrap();
+        let one = gnupg_binds(&dir);
+        assert_eq!(one.len(), 1, "{one:?}");
+        assert!(one[0].src.ends_with("pubring.kbx"), "{one:?}");
+
+        std::fs::write(dir.join("trustdb.gpg"), "").unwrap();
+        let both = gnupg_binds(&dir);
+        assert_eq!(both.len(), 2, "the trustdb joins the pubring: {both:?}");
+        // Read-only and same-path: these are oracles the sandbox reads, never writes.
+        assert!(both.iter().all(|b| b.ro && b.src == b.dst), "{both:?}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
