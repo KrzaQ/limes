@@ -38,6 +38,10 @@ pub struct Config {
     mounts: HashMap<String, MountSpec>,
     #[serde(default)]
     forward: Forward,
+    /// Standing suffix for the sandbox hostname; `None` means mirror the host verbatim.
+    /// `Option` for the same reason `Forward`'s fields are — so drop-ins merge field-by-field.
+    #[serde(default)]
+    hostname_suffix: Option<String>,
 }
 
 /// Standing on/off switches for the credential and socket forwards.
@@ -139,6 +143,7 @@ pub struct Resolved {
 pub fn load(ctx: &Context) -> Result<Option<Config>> {
     let mut merged: HashMap<String, MountSpec> = HashMap::new();
     let mut forward = Forward::default();
+    let mut hostname_suffix: Option<String> = None;
     let mut found = false;
 
     if let Ok(entries) = std::fs::read_dir(ctx.config_d_dir()) {
@@ -151,16 +156,18 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
             let cfg = parse(&f)?;
             merged.extend(cfg.mounts);
             forward.merge(cfg.forward);
+            hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
             found = true;
         }
     }
     if let Some(cfg) = parse_optional(&ctx.config_file())? {
         merged.extend(cfg.mounts);
         forward.merge(cfg.forward);
+        hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
         found = true;
     }
 
-    Ok(found.then_some(Config { mounts: merged, forward }))
+    Ok(found.then_some(Config { mounts: merged, forward, hostname_suffix }))
 }
 
 fn parse(path: &Path) -> Result<Config> {
@@ -184,6 +191,12 @@ impl Config {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn forward(&self) -> Forward {
         self.forward
+    }
+
+    /// The standing hostname suffix, for the CLI flag to override.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn hostname_suffix(&self) -> Option<&str> {
+        self.hostname_suffix.as_deref()
     }
 
     /// Turn config entries into mounts (+ symlinks to recreate). Missing paths hard-fail

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
 /// Image tag built by `lim build` and run by `lim run`.
 #[cfg(target_os = "linux")]
@@ -21,6 +21,9 @@ pub struct Context {
     pub gid: u32,
     pub home: PathBuf,
     pub xdg_runtime_dir: PathBuf,
+    /// The host's own hostname, which the sandbox mirrors by default (see `sandbox_hostname`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub hostname: String,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -33,7 +36,7 @@ impl Context {
         let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
-        Ok(Self { uid, gid, home, xdg_runtime_dir })
+        Ok(Self { uid, gid, home, xdg_runtime_dir, hostname: detect_hostname() })
     }
 
     /// The dedicated limes daemon socket — never the system/rootful one.
@@ -91,5 +94,107 @@ impl Context {
     /// Drop-in config dir: whole `*.toml` files owned by tools/installers (e.g. dotfiles).
     pub fn config_d_dir(&self) -> PathBuf {
         self.config_dir().join("config.d")
+    }
+}
+
+/// Longest hostname the kernel will accept. `HOST_NAME_MAX` is 64 including the NUL.
+const HOSTNAME_MAX: usize = 63;
+
+/// `gethostname(2)`. A failure here is not worth refusing to start a sandbox over, so it
+/// falls back the way `run`'s `/etc` reads do — the sandbox is still perfectly usable with
+/// a generic hostname.
+fn detect_hostname() -> String {
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return "localhost".into();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+/// The hostname to give the sandbox: the host's own, optionally suffixed.
+///
+/// Mirroring is the default because "it should feel exactly like the host" is the whole
+/// feature. The cost — per-host state (caches, history, anything shipping a hostname to a
+/// remote) merging between host and sandbox — is real but small, and the `LIM` prompt badge
+/// and `$LIMES_VERSION` already answer "where am I". The suffix exists for people who do
+/// want them distinguishable.
+///
+/// Without it the sandbox reports the container ID, which changes every run and reads as
+/// noise.
+pub fn sandbox_hostname(base: &str, suffix: Option<&str>) -> Result<String> {
+    let Some(suffix) = suffix.filter(|s| !s.is_empty()) else {
+        return Ok(truncate(base));
+    };
+    // Zsh's `%m` truncates at the first dot, so `krzaq.limes` renders as plain `krzaq`:
+    // the feature appears to do nothing at all, and the next hour goes into the wrong
+    // place. Refuse, and say which shell behaviour is responsible.
+    if suffix.contains('.') {
+        bail!(
+            "hostname suffix `{suffix}` contains a dot\n  \
+             zsh's `%m` truncates at the first dot, so the suffix would be invisible in \
+             your prompt — use `-` instead"
+        );
+    }
+    if let Some(c) = suffix.chars().find(|c| !c.is_ascii_alphanumeric() && *c != '-') {
+        bail!(
+            "hostname suffix `{suffix}` contains `{c}`; only letters, digits and `-` are allowed"
+        );
+    }
+    // Naive append, including for an FQDN: `box.lan` + `limes` gives `box.lan-limes`, not
+    // `box-limes.lan`. Inserting after the first label is prettier and more surprising.
+    //
+    // If that overflows, trim the *base* rather than the tail: the suffix is the whole
+    // point of asking for one, so it is the part that must survive.
+    let room = HOSTNAME_MAX.saturating_sub(suffix.len() + 1);
+    Ok(format!("{}-{suffix}", truncate_to(base, room)))
+}
+
+fn truncate(s: &str) -> String {
+    truncate_to(s, HOSTNAME_MAX)
+}
+
+fn truncate_to(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_suffix_mirrors_the_host() {
+        assert_eq!(sandbox_hostname("krzaq", None).unwrap(), "krzaq");
+        assert_eq!(sandbox_hostname("krzaq", Some("")).unwrap(), "krzaq", "empty means none");
+    }
+
+    /// The trap this rejection exists for: zsh `%m` would silently swallow the suffix.
+    #[test]
+    fn a_dotted_suffix_is_rejected_naming_the_reason() {
+        let err = sandbox_hostname("krzaq", Some("box.lan")).unwrap_err().to_string();
+        assert!(err.contains("%m"), "the error must name the cause: {err}");
+    }
+
+    #[test]
+    fn an_invalid_character_is_rejected() {
+        assert!(sandbox_hostname("krzaq", Some("a b")).is_err());
+        assert!(sandbox_hostname("krzaq", Some("a/b")).is_err());
+    }
+
+    /// Naive append, deliberately: `box-limes.lan` is prettier and more surprising.
+    #[test]
+    fn an_fqdn_base_appends_rather_than_inserting() {
+        assert_eq!(sandbox_hostname("box.lan", Some("limes")).unwrap(), "box.lan-limes");
+    }
+
+    /// The suffix is why you asked, so overflow eats the base, not the suffix.
+    #[test]
+    fn overflow_trims_the_base_and_keeps_the_suffix() {
+        let long = "a".repeat(80);
+        let h = sandbox_hostname(&long, Some("limes")).unwrap();
+        assert_eq!(h.len(), HOSTNAME_MAX);
+        assert!(h.ends_with("-limes"), "got: {h}");
+        assert_eq!(sandbox_hostname(&long, None).unwrap().len(), HOSTNAME_MAX);
     }
 }

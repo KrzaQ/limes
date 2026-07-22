@@ -98,6 +98,13 @@ since it names absolute paths that differ across machines (same idea as `~/.gitc
 "~/.config/gh" = "hide"                       # exists inside, but empty
 ```
 
+The sandbox takes **the host's own hostname**, so a prompt built on `%m` reads identically
+inside and out — without it you get the container ID, which changes every run and reads as
+noise. If you'd rather tell them apart, `hostname_suffix = "limes"` (or `--hostname-suffix`
+for one run) gives `krzaq-limes`. A suffix containing a dot is rejected, because zsh's `%m`
+truncates at the first dot and the setting would silently appear to do nothing; on an FQDN
+host the suffix is appended whole, so `box.lan` becomes `box.lan-limes`.
+
 A `[forward]` table carries standing on/off switches for the credential and socket
 forwards, for the same reason: a machine where you never want GPG forwarded shouldn't need
 a flag on every run.

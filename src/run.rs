@@ -19,7 +19,7 @@ use anyhow::{Context as _, bail};
 use crate::RunArgs;
 use crate::agents;
 use crate::config;
-use crate::context::Context;
+use crate::context::{self, Context};
 #[cfg(target_os = "linux")]
 use crate::identity;
 use crate::mounts::{self, Mount};
@@ -114,6 +114,12 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     cmd.args(["-u", "0:0"]);
     cmd.args(["-e", &format!("HOME={}", ctx.home.display())]);
     cmd.args(["-w", &path_str(&workspace)]);
+
+    // Mirror the host's hostname. Without this the sandbox reports the container ID, which
+    // changes every run and reads as noise. CLI beats config, as everywhere else.
+    let suffix =
+        args.hostname_suffix.as_deref().or_else(|| cfg.as_ref().and_then(|c| c.hostname_suffix()));
+    cmd.args(["--hostname", &context::sandbox_hostname(&ctx.hostname, suffix)?]);
 
     // ...and uid 0 has to *look* like the human, or `whoami` says root and every mounted
     // file lists as root. These are the only mounts whose destination differs from their

@@ -42,6 +42,15 @@
 # Config mounts override the built-in defaults but lose to CLI flags: `--rw <path>` still
 # wins for a single run, and `--no-config` ignores this file entirely.
 
+# The sandbox mirrors the host's hostname, so a prompt showing `%m` reads the same inside
+# and out. (Without it you get the container ID, which changes every run.) Set a suffix if
+# you'd rather tell them apart — `--hostname-suffix` overrides this for one run.
+#
+# A dot is rejected on purpose: zsh's `%m` truncates at the first dot, so `krzaq.limes`
+# would render as plain `krzaq` and the setting would look like it did nothing. On an FQDN
+# host the suffix is simply appended — `box.lan` becomes `box.lan-limes`, not `box-limes.lan`.
+# hostname_suffix = "limes"
+
 # Standing on/off switches for the credential and socket forwards. All default to on, and
 # each no-ops silently when the thing it forwards isn't there — so you only need a line
 # here to turn something off. Same precedence as mounts: CLI beats config, in both

@@ -148,6 +148,9 @@ pub struct RunArgs {
     /// Name for the sandbox container (default: derived from workspace)
     #[arg(long)]
     pub name: Option<String>,
+    /// Suffix the sandbox hostname (default: the host's own hostname, verbatim)
+    #[arg(long = "hostname-suffix", value_name = "SUFFIX")]
+    pub hostname_suffix: Option<String>,
     /// Do not auto-detect and mount any host agents
     #[arg(long)]
     pub no_agents: bool,
