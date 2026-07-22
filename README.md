@@ -81,6 +81,11 @@ lim prune                 # reclaim space (safe: dedicated daemon)
 lim docker ps             # run docker against the limes daemon
 ```
 
+A terminal is allocated only when there is one, so `lim run -- <cmd>` works unattended from
+a script, cron or CI. Piping behaves as it does on the host — `lim run -- make test | tee
+log` gets the same plain output `make test | tee log` would, rather than a log full of
+raw-mode `^M` and colour the tool emitted only because it thought it had a terminal.
+
 ## Setup
 
 `lim bootstrap` names any missing prerequisites and stops (it never runs a package manager

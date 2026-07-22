@@ -193,7 +193,8 @@ pub fn join(
 }
 
 /// The `docker exec` `join` would run — also what `--dry-run` prints, so the two cannot
-/// describe different things.
+/// describe different things. That now includes the attach flags, so `--dry-run` output
+/// differs between a terminal and a pipe; it is reporting what would actually run.
 pub fn join_command(
     ctx: &Context,
     name: &str,
@@ -202,7 +203,7 @@ pub fn join_command(
     env: &[String],
 ) -> Command {
     let mut c = docker::command(ctx);
-    c.args(["exec", "-it"]);
+    c.args(attach_args(have_terminal()));
     if let Some(cwd) = cwd {
         c.args(["-w", &cwd.display().to_string()]);
     }
@@ -212,6 +213,32 @@ pub fn join_command(
     c.arg(name);
     c.args(cmd);
     c
+}
+
+/// How to attach stdio to the exec.
+///
+/// `-i` unconditionally: without it `echo x | lim run -- cat` has nothing to read. `-t` only
+/// when there is a terminal, because docker *refuses* the exec outright when `-t` is asked
+/// for and stdin is not one — which, since every shell became an exec, made `lim run -- make
+/// test` impossible from a script, cron or CI.
+fn attach_args(tty: bool) -> &'static [&'static str] {
+    if tty { &["exec", "-i", "-t"] } else { &["exec", "-i"] }
+}
+
+/// Whether to allocate a pty — **both** ends, deliberately.
+///
+/// Docker only objects when *stdin* is not a terminal, so stdin alone would be enough to
+/// stop the refusal. Requiring stdout too is what makes `lim run -- make test | tee log`
+/// behave the way `make test | tee log` behaves on the host: a `-t` exec puts the pty in raw
+/// mode, so the log fills with CR and with colour that the tool inside only emitted because
+/// it saw a terminal. Mirroring the host is the whole premise, and it applies to the shape
+/// of the output as much as to the filesystem.
+///
+/// `IsTerminal` is std, unlike the `flock`/`statfs` calls elsewhere here that have no std
+/// equivalent — no reason to reach for `libc` and `unsafe` for this one.
+fn have_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 /// Stop the sandbox if this was its last shell.
@@ -247,4 +274,18 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     // A signalled child has no exit code; report it the way a shell does.
     status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `-i` is not conditional. Collapsing these back to one `-it` literal is the obvious
+    /// simplification and it is what broke running `lim` without a terminal; dropping `-i`
+    /// in the other direction would silently break piping stdin *in*.
+    #[test]
+    fn stdin_always_attaches_and_only_the_pty_is_conditional() {
+        assert_eq!(attach_args(true), ["exec", "-i", "-t"]);
+        assert_eq!(attach_args(false), ["exec", "-i"]);
+    }
 }
