@@ -28,6 +28,17 @@
 # some of your machines.
 # "~/.zshrc.local" = { mode = "ro", optional = true }
 
+# "hide" — the path exists inside the sandbox but is empty, and the host's contents are
+# unreachable. It's for punching a hole in a mount that is otherwise too broad: mount
+# ~/.config ro so 35 tools work, then take back the dirs that hold credentials. Directories
+# only (hiding a file is an error); the empty dir is writable but nothing in it reaches the
+# host; and hiding a path that isn't there is a silent no-op, so this is safe to sync.
+# "~/.config/gh"      = "hide"
+# "~/.config/secrets" = "hide"
+#
+# It is a blocklist, and blocklists rot — next month's tool drops a token somewhere new and
+# nothing warns you. Use it as a bridge, not as a guarantee that the sandbox holds no keys.
+
 # Config mounts override the built-in defaults but lose to CLI flags: `--rw <path>` still
 # wins for a single run, and `--no-config` ignores this file entirely.
 

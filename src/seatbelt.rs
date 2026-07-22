@@ -27,7 +27,7 @@
 
 use std::path::Path;
 
-use crate::mounts::Mount;
+use crate::mounts::{Kind, Mount};
 
 /// Device files and pty plumbing an ordinary shell needs before `(deny file-write*)`
 /// stops breaking it. Without these, `echo > /dev/null` and `mktemp` fail — long before
@@ -79,9 +79,27 @@ pub fn profile(mounts: &[Mount], tmpdir: &Path) -> String {
 /// first assumed. Under a `(deny file-write*)` base a top-level `--ro` is indeed
 /// redundant — but a `--ro` *nested inside* a `--rw` is not, and must re-deny the hole.
 /// Emitting unconditionally is both simpler and correct; the redundant case is harmless.
+///
+/// `hide` is the profile's **first read restriction** — everything else here is a write
+/// policy under `(allow default)`. That makes `doctor`'s "reads are unrestricted" claim
+/// conditional, which is why it now says *except paths declared `hide`*.
+///
+/// It also means `hide` diverges between the backends in kind, not just in strength:
+/// Linux shadows the path with an empty *writable* tmpfs, so an app that recreates its
+/// config on a missing dir just works; here the same app gets EPERM. Neither is wrong —
+/// Seatbelt has no union mount to offer — but they are not the same behaviour, and code
+/// that self-heals on one will error on the other.
+///
+/// Both operations named below are wildcards, so the "never narrower than `file-write*`"
+/// warning above is satisfied: that warning is about *write* operations specifically, and
+/// `file-read*` is a different operation class.
 fn rule(m: &Mount) -> String {
-    let verb = if m.read_only { "deny" } else { "allow" };
-    format!("({verb} file-write* (subpath {}))", quote(&m.host))
+    let p = quote(&m.path);
+    match m.kind {
+        Kind::Ro => format!("(deny file-write* (subpath {p}))"),
+        Kind::Rw => format!("(allow file-write* (subpath {p}))"),
+        Kind::Hide => format!("(deny file-read* file-write* (subpath {p}))"),
+    }
 }
 
 /// SBPL string literal. Backslash first, or the escaping eats itself.
@@ -133,10 +151,32 @@ mod tests {
         }
     }
 
+    /// `hide` is the only rule that restricts *reads*, and it must restrict writes too —
+    /// an empty-but-writable hole would still let a process plant files where the host
+    /// tree it is shadowing lives.
+    #[test]
+    fn hide_denies_both_reads_and_writes() {
+        let p = mkprofile(&[Mount::hide("/a".into())]);
+        assert!(p.contains(r#"(deny file-read* file-write* (subpath "/a"))"#), "got: {p}");
+    }
+
+    /// Same ordering guarantee as the nested-ro case: a `hide` inside a broad `ro` mount
+    /// is the whole point of the mode, and Seatbelt takes the *last* matching rule.
+    #[test]
+    fn nested_hide_is_emitted_after_its_parent() {
+        let mut m = vec![Mount::hide("/a/b/creds".into()), Mount::ro("/a".into())];
+        crate::mounts::sort_for_nesting(&mut m);
+        let p = mkprofile(&m);
+        let parent = p.find(r#"(deny file-write* (subpath "/a"))"#).expect("parent rule");
+        let child = p.find(r#"(subpath "/a/b/creds")"#).expect("child rule");
+        assert!(parent < child, "parent must precede child or the hole never applies");
+    }
+
     /// Emitting anything narrower than `file-write*` would be unfixable by ordering.
     #[test]
     fn never_emits_a_narrow_write_operation() {
-        let p = mkprofile(&[Mount::rw("/a".into()), Mount::ro("/b".into())]);
+        let p =
+            mkprofile(&[Mount::rw("/a".into()), Mount::ro("/b".into()), Mount::hide("/c".into())]);
         for narrow in ["file-write-unlink", "file-write-create", "file-write-data"] {
             assert!(!p.contains(narrow), "profile must not name {narrow}");
         }

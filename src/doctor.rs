@@ -224,7 +224,7 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     for line in [
         "process isolation  — no PID namespace; `ps` sees the whole host",
         "network isolation  — no netns; network filtering is an explicit non-goal",
-        "read confinement   — reads are unrestricted; only writes are bounded",
+        "read confinement   — reads are unrestricted except paths declared `hide`",
         "container lifecycle— no objects to list, stop or prune (those subcommands are Linux-only)",
     ] {
         println!("  · {line}");

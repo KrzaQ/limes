@@ -7,7 +7,7 @@
 //!
 //! **The mount table is shared.** Both backends consume the same deduped, depth-sorted
 //! `Vec<Mount>` produced by the same precedence chain; only the final translation differs
-//! — `-v` args on one side, SBPL rules on the other.
+//! — docker flags on one side, SBPL rules on the other.
 
 use std::path::Path;
 use std::process::Command;
@@ -58,12 +58,19 @@ fn assemble_mounts(
         symlinks = resolved.symlinks;
     }
     // User-supplied holes (canonicalized; must exist on host). `--rw` after `--ro`
-    // so a path given both ways ends up writable.
+    // so a path given both ways ends up writable, and `--hide` after both: it is the
+    // safety direction, so `--rw X --hide X` hides.
     for p in &args.ro {
         mounts.push(Mount::ro(mounts::canonicalize(p)?));
     }
     for p in &args.rw {
         mounts.push(Mount::rw(mounts::canonicalize(p)?));
+    }
+    for p in &args.hide {
+        // Missing is a no-op rather than an error — see `mounts::resolve_hide`.
+        if let Some(p) = mounts::resolve_hide(p)? {
+            mounts.push(Mount::hide(p));
+        }
     }
 
     dedupe(&mut mounts);
@@ -158,9 +165,10 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
         cmd.args(["-e", e]);
     }
 
-    // All same-path mounts.
+    // The mount table. Each entry renders its own flag pair — `-v` for the binds,
+    // `--tmpfs` for a `hide` — so a mode is never forced into being a bind.
     for m in &mounts {
-        cmd.args(["-v", &m.to_arg()]);
+        cmd.args(m.to_args());
     }
 
     cmd.arg(IMAGE_TAG);
@@ -329,8 +337,10 @@ fn preflight(ctx: &Context) -> Result<()> {
 fn dedupe(mounts: &mut Vec<Mount>) {
     let mut out: Vec<Mount> = Vec::new();
     for m in mounts.drain(..) {
-        if let Some(existing) = out.iter_mut().find(|e| e.host == m.host) {
-            existing.read_only = m.read_only;
+        if let Some(existing) = out.iter_mut().find(|e| e.path == m.path) {
+            // The *whole* kind, not some field of it: copying less than this quietly
+            // breaks last-wins the moment a mode carries more than read-only-ness.
+            existing.kind = m.kind;
         } else {
             out.push(m);
         }
@@ -414,6 +424,19 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0], Mount::ro("/a".into()), "later ro downgrades the earlier rw");
         assert_eq!(m[1], Mount::ro("/b".into()));
+    }
+
+    /// Last-wins has to hold across *differing* kinds, not just ro-vs-rw — otherwise
+    /// `--hide` on a path some default already mounts silently does nothing.
+    #[test]
+    fn dedupe_is_last_wins_across_kinds() {
+        let mut m = vec![Mount::rw("/a".into()), Mount::hide("/a".into())];
+        dedupe(&mut m);
+        assert_eq!(m, vec![Mount::hide("/a".into())], "hide beats an earlier rw");
+
+        let mut m = vec![Mount::hide("/a".into()), Mount::ro("/a".into())];
+        dedupe(&mut m);
+        assert_eq!(m, vec![Mount::ro("/a".into())], "and is itself overridable");
     }
 
     #[cfg(target_os = "linux")]

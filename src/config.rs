@@ -12,6 +12,8 @@
 //! "~/.zshrc"             = { mode = "ro", link = "parent" }   # recreate the symlink,
 //!                                                             # mount its target's dir
 //! "~/.zshrc.local"       = { mode = "ro", optional = true }   # skip if absent
+//! "~/.config/gh"         = "hide"                             # empty inside; a hole in
+//!                                                             # a broader mount above
 //!
 //! [forward]
 //! gpg = false                                                 # never forward gpg here
@@ -77,16 +79,20 @@ enum MountSpec {
         #[serde(default)]
         link: Option<Link>,
         /// Skip silently if the path doesn't exist, instead of hard-failing.
+        /// Redundant with `mode = "hide"`, which is always optional; harmless there.
         #[serde(default)]
         optional: bool,
     },
 }
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 enum Mode {
     Ro,
     Rw,
+    /// Shadow the path with an empty dir. Subtractive: the point is to punch a hole in a
+    /// broader mount (`~/.config` ro, minus the credential dirs inside it).
+    Hide,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -192,6 +198,22 @@ impl Config {
             let path = PathBuf::from(expanded.as_ref());
             let mode = spec.mode();
 
+            // `hide` has no host source to bind, so it resolves on its own terms: a
+            // missing path is a silent no-op (nothing to shadow), and a file is a hard
+            // error rather than a mount that quietly fails to hide anything.
+            if mode == Mode::Hide {
+                if spec.link().is_some() {
+                    bail!(
+                        "config mount `{raw}`: link=\"parent\" cannot combine with \
+                         mode=\"hide\" — it would hide the symlink target's parent dir"
+                    );
+                }
+                if let Some(p) = mounts::resolve_hide(&path)? {
+                    mounts.push(Mount::hide(p));
+                }
+                continue;
+            }
+
             match spec.link() {
                 Some(Link::Parent) => {
                     let is_symlink = std::fs::symlink_metadata(&path)
@@ -229,10 +251,13 @@ impl Config {
     }
 }
 
+/// The two modes that are host binds. `Hide` never reaches here — it short-circuits
+/// earlier in `resolve`, because it has no host source and its own existence rules.
 fn mount(mode: Mode, path: PathBuf) -> Mount {
     match mode {
         Mode::Ro => Mount::ro(path),
         Mode::Rw => Mount::rw(path),
+        Mode::Hide => unreachable!("hide is resolved before this point"),
     }
 }
 
@@ -264,6 +289,24 @@ mod tests {
     #[test]
     fn forward_rejects_unknown_key() {
         assert!(toml::from_str::<Config>("[forward]\ngpgg = false\n").is_err());
+    }
+
+    /// The `untagged` MountSpec is what gives a new mode both spellings for free; assert
+    /// it, since nothing else would notice if the shorthand quietly stopped parsing.
+    #[test]
+    fn hide_parses_in_both_forms() {
+        let c = parse_str("[mounts]\n\"/a\" = \"hide\"\n\"/b\" = { mode = \"hide\" }\n");
+        assert_eq!(c.mounts["/a"].mode(), Mode::Hide);
+        assert_eq!(c.mounts["/b"].mode(), Mode::Hide);
+    }
+
+    /// `link = "parent"` mounts the *target's parent dir*, so combining it with `hide`
+    /// would hide a directory the user never named. Refuse rather than surprise.
+    #[test]
+    fn hide_rejects_link_parent() {
+        let c = parse_str("[mounts]\n\"/a\" = { mode = \"hide\", link = \"parent\" }\n");
+        let err = c.resolve().map(|_| ()).expect_err("hide + link must not resolve");
+        assert!(err.to_string().contains("cannot combine"), "got: {err}");
     }
 
     /// The drop-in merge: `config.toml` is applied last and wins, but only on the keys it

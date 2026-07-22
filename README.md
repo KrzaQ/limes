@@ -52,6 +52,7 @@ If you need to contain a hostile process, use a VM, not this.
 lim                       # zsh in a sandbox of $PWD (read-write)
 lim run -- make test      # run a command instead of a shell
 lim --ro ~/code --rw ~/code/project    # read-only tree with a writable window
+lim --ro ~/.config --hide ~/.config/gh # ...and a subtractive hole: empty inside
 lim --dry-run             # print the docker run it would execute, and stop
 lim --no-agents           # don't mount claude/opencode
 lim --no-gpg --no-docker  # turn off individual forwards for one run
@@ -93,6 +94,7 @@ since it names absolute paths that differ across machines (same idea as `~/.gitc
 "~/scratch"   = { mode = "rw" }
 "~/.zshrc"    = { mode = "ro", link = "parent" }   # recreate the symlink, mount its dir
 "~/.zshrc.local" = { mode = "ro", optional = true } # skip if absent
+"~/.config/gh" = "hide"                       # exists inside, but empty
 ```
 
 A `[forward]` table carries standing on/off switches for the credential and socket
@@ -126,6 +128,23 @@ would break inside the sandbox. With `link = "parent"`, limes instead **recreate
 symlink** inside (pointing at the same target) and mounts the target's **parent directory**
 ro — so siblings like a zsh `plugins/` dir come along, and self-locating config resolves
 exactly as on the host.
+
+**`hide`** is the subtractive mode: the path exists inside the sandbox but is empty, and
+the host's contents are unreachable. It's for punching a hole in a mount that is otherwise
+too broad — mounting `~/.config` ro to make 35 tools work, minus the handful of directories
+under it that hold credentials. Precedence is the ordinary one, so a `hide` beats any
+earlier mount of the same path, and depth-sorting puts it on top of its parent. It applies
+to **directories only** (hiding a file is a hard error naming its parent), the shadow is
+writable but ephemeral — an app that recreates its config finds an empty dir and gets on
+with it, and nothing it writes reaches the host — and hiding a path that doesn't exist is a
+silent no-op rather than an error, so a synced drop-in can name dirs that exist on only
+some of your machines.
+
+Be clear-eyed about what it is: **a blocklist, and blocklists rot.** The tool you install
+next month puts a token in `~/.config/newtool/`, nobody updates the list, and nothing warns
+you. `hide` is a bridge, not a guarantee of completeness — the real fix is not mounting
+`~/.config` wholesale in the first place. It does not change the standing rule that
+credentials should reach the sandbox as *oracles* (agent sockets), never as key material.
 
 **Drop-ins:** alongside `config.toml`, limes also reads `~/.config/limes/config.d/*.toml`
 (merged, `config.toml` winning on collisions). `config.toml` is yours to hand-write;

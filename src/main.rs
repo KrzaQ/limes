@@ -136,6 +136,9 @@ pub struct RunArgs {
     /// Mount PATH read-write (same path inside), repeatable
     #[arg(long = "rw", value_name = "PATH")]
     pub rw: Vec<PathBuf>,
+    /// Shadow PATH with an empty dir, hiding the host's contents, repeatable
+    #[arg(long = "hide", value_name = "PATH")]
+    pub hide: Vec<PathBuf>,
     /// Print the assembled `docker run` and exit without running it
     #[arg(long)]
     pub dry_run: bool,

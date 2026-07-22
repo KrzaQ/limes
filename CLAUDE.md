@@ -105,12 +105,18 @@ pushed **least-to-most explicit**, then `dedupe()` collapses exact-path collisio
 *last wins*, then `sort_for_nesting()` orders parent-before-child:
 
 ```
-built-in defaults  →  detected agents  →  rosa  →  workspace (rw)  →  config.toml/config.d  →  --ro  →  --rw
+built-in defaults  →  detected agents  →  rosa  →  workspace (rw)  →  config.toml/config.d  →  --ro  →  --rw  →  --hide
 ```
 
 So a config entry overrides an implicit default, a CLI flag overrides config, and `--rw`
-beats `--ro` for the same path in a single run. Order of the pushes *is* the policy —
-changing it changes user-visible precedence.
+beats `--ro` for the same path in a single run. `--hide` is last because it is the safety
+direction. Order of the pushes *is* the policy — changing it changes user-visible
+precedence.
+
+A `Mount` is **not** a bind mount: it is a policy for one path *inside* the sandbox, which
+each backend renders its own way (`-v`, `--tmpfs`, or an SBPL rule). `Kind` is deliberately
+payload-free so `Mount` stays `PartialEq` — `dedupe` copies the whole kind, and copying any
+less quietly breaks last-wins for a mode that carries more than read-only-ness.
 
 **`forward.rs`** owns the four credential/socket forwards (ssh, gpg, rosa, docker) and
 resolves each one **built-in default (on) → config `[forward]` → CLI flag**, mirroring how
@@ -135,7 +141,13 @@ which `run.rs` turns into an `sh -c 'ln -sfn …; exec "$@"'` prelude that recre
 symlink in the tmpfs `$HOME` before exec'ing the real command. This is what makes
 self-locating shell config (zsh plugin paths derived from `~/.zshrc`'s own resolved
 location) work. Deliberately, limes has **no shell-specific knowledge** — rc files arrive
-via a dotfiles-owned `config.d` drop-in, not from `default_mounts()`.
+via a dotfiles-owned `config.d` drop-in, not from `default_mounts()`. `mode = "hide"`
+shadows a subpath of a broad mount with an empty tmpfs — directories only, and the one
+mode exempt from the must-exist rule (nothing to shadow is a no-op, so a *synced* drop-in
+can name credential dirs that exist on only some machines). A sibling `overlay` mode
+(ephemeral writes over a host tree, via a `local`-driver overlayfs volume) is wanted but
+unbuilt — it rests on a bind nested *inside* an overlay volume, which is untested and is
+the live case today, since `~/.config/opencode` sits inside the drop-in's `~/.config`.
 
 **`bootstrap.rs`** writes the vendored `vendor/dockerd-rootless.sh` (from Moby, Apache-2.0,
 `include_str!`'d into the binary) to `~/.local/share/limes/bin`, renders a `limes-docker.service`
