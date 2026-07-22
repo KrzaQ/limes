@@ -76,6 +76,19 @@ pub fn exec_count(ctx: &Context, name: &str) -> usize {
     inspect(ctx, name, "{{len .ExecIDs}}").and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
+/// Full `docker inspect` JSON for a container — the raw material for comparing a running
+/// sandbox against a requested policy, without a fingerprint label that could go stale.
+pub fn inspect_json(ctx: &Context, name: &str) -> Result<String> {
+    let out = command(ctx)
+        .args(["inspect", name])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to exec docker: {e}"))?;
+    if !out.status.success() {
+        bail!("could not inspect `{name}`: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// One `docker inspect --format` field, or `None` if the container is absent.
 fn inspect(ctx: &Context, name: &str, format: &str) -> Option<String> {
     let out = command(ctx)

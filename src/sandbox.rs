@@ -47,6 +47,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::context::Context;
 use crate::docker;
+use crate::policy;
 use crate::run::RunSpec;
 
 /// An `flock`, released when dropped — or by the kernel when the process dies, which is
@@ -111,13 +112,22 @@ pub fn ensure_running(ctx: &Context, spec: &RunSpec) -> Result<bool> {
         // failing on a name conflict with a corpse.
         docker::remove_quietly(ctx, &spec.name);
         create(ctx, spec)?;
+    } else {
+        // Joining is only safe while the sandbox you land in is the one you asked for.
+        // Refuse loudly and show the difference, rather than handing out a shell whose
+        // mounts silently are not the ones you typed.
+        let running = policy::parse(&docker::inspect_json(ctx, &spec.name)?)?;
+        let diffs = policy::diff(spec, &running);
+        if !diffs.is_empty() {
+            bail!("{}", policy::describe(&spec.name, &diffs));
+        }
     }
     // Always run, even when joining: a creator that died between `docker run` and this step
     // would otherwise leave a sandbox whose `$HOME` has no dotfiles, and nothing would say
     // so. The script no-ops when the marker is already there, so the steady-state cost is
     // one exec. Re-running it unconditionally is *not* an option — `ln -sfn` is not atomic,
     // so a joiner would briefly yank `~/.zshrc` from under a shell that is starting up.
-    initialize(ctx, spec)?;
+    initialize(ctx, spec, created)?;
     Ok(created)
 }
 
@@ -138,14 +148,17 @@ fn create(ctx: &Context, spec: &RunSpec) -> Result<()> {
 /// Run the symlink prelude inside the container, once.
 ///
 /// It mutates the shared tmpfs `$HOME`, so it belongs to the *container*, not to a shell.
-fn initialize(ctx: &Context, spec: &RunSpec) -> Result<()> {
+fn initialize(ctx: &Context, spec: &RunSpec, ours: bool) -> Result<()> {
     let mut cmd = docker::command(ctx);
     cmd.args(["exec", &spec.name, BUSYBOX, "sh", "-c", &spec.init_script()]);
     let out = cmd.output().context("failed to exec docker")?;
     if !out.status.success() {
-        // A half-initialised sandbox is worse than none: tear it down rather than hand out
-        // shells whose dotfiles silently never arrived.
-        docker::remove_quietly(ctx, &spec.name);
+        // A half-initialised sandbox is worse than none, so clean it up — but only if we
+        // are the ones who just made it. Joining a sandbox that already has shells in it
+        // and then removing it on our own error would take those shells down too.
+        if ours {
+            docker::remove_quietly(ctx, &spec.name);
+        }
         bail!(
             "could not initialise sandbox {}: {}",
             spec.name,

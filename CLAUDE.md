@@ -180,6 +180,16 @@ are load-bearing and each was measured, not assumed:
   see: a `lim` that has found the sandbox but not yet attached, whose shell does not exist
   to be counted. Retrying instead would be wrong — it would re-run the user's command.
 
+**`policy.rs` is what makes joining safe.** Before attaching to an existing sandbox, the
+resolved `RunSpec` is compared against `docker inspect` — *not* against a fingerprint
+label, which would be a second copy of the truth able to go stale. Deriving from the daemon
+also means the human-readable diff falls out for free, and printing it is not optional: a
+bare "policy mismatch, refusing" is the kind of error people route around by always passing
+`--name`, which disables joining entirely. Any difference refuses; env and cwd are exempt
+because `docker exec` carries its own `-e`/`-w` and they are per-shell. This is why
+`RunSpec` must hold *everything* docker is told — a piece that emitted its own args on the
+side would be invisible here, and silently stay invisible.
+
 **Discovery is the name, not a label scan.** `derive_name` is a total function of the
 workspace path, so `docker inspect <name>` either hits or it does not. Sandboxes are still
 stamped `limes=1`, `limes.workspace=…`, `limes.cmd=…`, and `status.rs`/`passthrough.rs`
