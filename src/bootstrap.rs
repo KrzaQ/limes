@@ -110,6 +110,10 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
     // ── 3. systemd user unit for the dedicated rootless daemon ──────
     let unit_path = ctx.service_file();
     let unit = unit_file(&data_root);
+    // A daemon already running from the old unit keeps its old data-root and socket:
+    // `enable --now` starts a stopped service but will not restart a live one, so without
+    // this the rewritten unit sits on disk describing a daemon that isn't what's running.
+    let unit_changed = std::fs::read_to_string(&unit_path).map(|old| old != unit).unwrap_or(true);
     if dry {
         println!("would write {}:\n{}", unit_path.display(), indent(&unit));
     } else {
@@ -125,6 +129,13 @@ pub fn bootstrap(ctx: &Context, args: &BootstrapArgs) -> Result<()> {
     // ── 4. Enable + start the service, enable linger ────────────────
     systemd(dry, &["--user", "daemon-reload"])?;
     systemd(dry, &["--user", "enable", "--now", SERVICE])?;
+    // Only when the unit actually changed: a restart takes every running sandbox's
+    // containers with it, which is not something a re-run of an idempotent command should
+    // do for free.
+    if unit_changed && systemctl_active(SERVICE) {
+        println!("unit changed — restarting {SERVICE}");
+        systemd(dry, &["--user", "restart", SERVICE])?;
+    }
     loginctl_linger(dry)?;
 
     // ── 5. Wait for the socket, then build the image ────────────────
@@ -204,6 +215,17 @@ fn unit_file(data_root: &Path) -> String {
          WantedBy=default.target\n",
         data_root.display()
     )
+}
+
+/// Whether systemd currently has the unit running — the question `enable --now` doesn't
+/// ask. Any failure to run `systemctl` reads as "not active", which errs toward not
+/// restarting something we cannot see.
+fn systemctl_active(service: &str) -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", service])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn systemd(dry: bool, args: &[&str]) -> Result<()> {
