@@ -177,6 +177,17 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     // pinned so the mode never depends on the uid. Matches /tmp, which the image chmods.
     mounts.push(MountArg::Tmpfs(Tmpfs::new(Path::new("/tmp"), "exec")));
     mounts.push(MountArg::Tmpfs(Tmpfs::new(&ctx.home, "exec,mode=1777")));
+    // The session runtime dir, at the host's path and with `$XDG_RUNTIME_DIR` set to it
+    // below. Host config routinely computes a path from that variable -- an ssh-agent
+    // socket is the usual one -- and with the variable unset those expand to nonsense
+    // (`$XDG_RUNTIME_DIR/ssh-agent.socket` becomes `/ssh-agent.socket`), silently
+    // overwriting a socket limes had forwarded correctly. A login shell inside would then
+    // find no agent while `lim ssh-add -l`, which runs no login shell, worked.
+    //
+    // A tmpfs rather than nothing, so the directory exists even when no forward puts a
+    // socket in it, and 0700 because that is what the spec promises anything writing here.
+    // It is scaffolding: the forwarded sockets mount on top of it, so it has to come first.
+    mounts.push(MountArg::Tmpfs(Tmpfs::new(&ctx.xdg_runtime_dir, "mode=0700")));
     // Everything above is scaffolding that exists before any host path is mirrored, which
     // is what makes it the right place to splice the invented directories into below.
     let scaffolding = mounts.len();
@@ -212,6 +223,12 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         // presence means "inside limes", value is the version. It's the crate version, so
         // it never drifts from Cargo.toml / `lim --version`.
         concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION")).to_string(),
+        // Mirrored from the host rather than translated to the container's uid 0: every
+        // other path limes mirrors is identical inside and out, and a literal
+        // `/run/user/1000` in a script or unit file has to keep meaning what it means on
+        // the host. gnupg is unaffected either way -- it keys off `/run/user/<uid>`
+        // existing, not off this variable.
+        format!("XDG_RUNTIME_DIR={}", ctx.xdg_runtime_dir.display()),
     ];
     // Point git's *system* config tier at the file mounted above. Nothing else supplies one
     // inside — `/etc/gitconfig` is not among the `/etc` handful `default_mounts` mirrors —
