@@ -198,6 +198,15 @@ pub struct RunArgs {
     /// Do not forward the limes docker socket
     #[arg(long = "no-docker", overrides_with = "docker")]
     pub no_docker: bool,
+
+    // Named for git's *system* config tier, not for `~/.gitconfig` — which is mounted
+    // read-only either way, and which overrides this. Resolves like the forwards above.
+    /// Give the sandbox a system gitconfig setting core.checkStat=minimal (default)
+    #[arg(long = "system-gitconfig", overrides_with = "no_system_gitconfig")]
+    pub system_gitconfig: bool,
+    /// Do not generate a system gitconfig for the sandbox
+    #[arg(long = "no-system-gitconfig", overrides_with = "system_gitconfig")]
+    pub no_system_gitconfig: bool,
     /// Command to run in the sandbox (default: an interactive login zsh)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cmd: Vec<String>,

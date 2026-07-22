@@ -126,6 +126,26 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     let detected = agents::detect(ctx, args);
     let mut extra = detected.mounts.clone();
     extra.extend(forward::rosa_mounts(ctx, forwards.rosa));
+
+    // The generated system gitconfig, which stops git rebuilding its index on every run
+    // inside — see `identity::SYSTEM_GITCONFIG` for why uid 0 causes that. Resolved the
+    // same way the forwards are (built-in default → config → CLI), though it forwards
+    // nothing, so it reuses their helpers rather than restating the rule.
+    //
+    // It rides `extra` rather than `default_mounts` because that is the seam that has the
+    // resolved switch; the tier is the same either way, so config and `--ro`/`--rw` still
+    // override the path. Written here, before the table is assembled, because a mount whose
+    // path does not exist is a hard error.
+    let system_gitconfig = forward::enabled(
+        forward::tri(args.system_gitconfig, args.no_system_gitconfig),
+        cfg.as_ref().and_then(|c| c.system_gitconfig()),
+    );
+    if system_gitconfig {
+        std::fs::write(ctx.gitconfig_file(), identity::SYSTEM_GITCONFIG)
+            .with_context(|| format!("writing {}", ctx.gitconfig_file().display()))?;
+        extra.push(Mount::ro(ctx.gitconfig_file()));
+    }
+
     let (table, mut symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
     // An agent's launcher symlink is recreated the same way config's `link = "parent"`
     // entries are — one prelude, one mechanism.
@@ -193,6 +213,12 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         // it never drifts from Cargo.toml / `lim --version`.
         concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION")).to_string(),
     ];
+    // Point git's *system* config tier at the file mounted above. Nothing else supplies one
+    // inside — `/etc/gitconfig` is not among the `/etc` handful `default_mounts` mirrors —
+    // so this suppresses nothing that was reachable anyway.
+    if system_gitconfig {
+        env.push(format!("GIT_CONFIG_SYSTEM={}", ctx.gitconfig_file().display()));
+    }
     // Forward env before the user's, so an explicit `-e` still wins over what a forward sets.
     env.extend(pieces.env);
     env.extend(args.env.iter().cloned());

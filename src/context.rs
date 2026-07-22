@@ -74,6 +74,13 @@ impl Context {
         self.xdg_runtime_dir.join("limes-group")
     }
 
+    /// Generated system gitconfig, pointed at by `GIT_CONFIG_SYSTEM` inside the sandbox
+    /// (see `identity::SYSTEM_GITCONFIG`). Same reasoning as the two above for living here:
+    /// per-user tmpfs, never outliving the login session, rewritten on every run.
+    pub fn gitconfig_file(&self) -> PathBuf {
+        self.xdg_runtime_dir.join("limes-gitconfig")
+    }
+
     /// Per-sandbox lock, serialising *create-and-initialise* across concurrent `lim`s.
     ///
     /// It sits in `$XDG_RUNTIME_DIR` for the same reason the identity files do — per-user

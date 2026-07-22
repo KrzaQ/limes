@@ -42,13 +42,16 @@ impl Forwards {
 }
 
 /// Built-in default → config → CLI. Everything forwards unless something says otherwise.
-fn enabled(cli: Option<bool>, cfg: Option<bool>) -> bool {
+///
+/// `pub(crate)` because the generated system gitconfig (`run.rs`) is not a forward but
+/// resolves identically, and one copy of this rule is better than two that can drift.
+pub(crate) fn enabled(cli: Option<bool>, cfg: Option<bool>) -> bool {
     cli.or(cfg).unwrap_or(true)
 }
 
 /// Collapse a `--x` / `--no-x` pair into a tri-state. clap's `overrides_with` makes the
 /// last flag on the command line the winner, so at most one of these is ever set.
-fn tri(yes: bool, no: bool) -> Option<bool> {
+pub(crate) fn tri(yes: bool, no: bool) -> Option<bool> {
     match (yes, no) {
         (true, _) => Some(true),
         (_, true) => Some(false),

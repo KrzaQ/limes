@@ -35,6 +35,14 @@ If you need to contain a hostile process, use a VM, not this.
   runtime creates them `0755` whatever your host says. `limes` gives each one the mode its
   host counterpart has, so `~/.gnupg` arrives `0700` (gpg refuses to stop warning otherwise)
   and so does `~/.local`.
+- **Keeps git's index from thrashing.** Inside the sandbox you are container uid 0 (that
+  *is* you — see below), so every host file stats as uid 0, while the index on disk records
+  uid 1000. Git's default `core.checkStat` compares owners, so every entry looks modified:
+  `git status` re-hashes the whole work tree and rewrites the index, and then the host does
+  the same in reverse, forever. limes gives the sandbox its own **system** gitconfig
+  (`core.checkStat = minimal`, via `GIT_CONFIG_SYSTEM`) which drops the fields a bind mount
+  can't preserve. Lowest tier, so your `~/.gitconfig` and any repo still override it; your
+  own config is never touched, on either side. `--no-system-gitconfig` opts out.
 - **One sandbox per workspace.** A second `lim` in the same directory *joins* the first
   rather than building another beside it — two terminals on your host are two shells on one
   machine, and inside they likewise share `$HOME`, `/tmp` and the process table. The
@@ -141,6 +149,19 @@ of flags — `--gpg` / `--no-gpg`, `--docker` / `--no-docker`, and so on — and
 over config in *both* directions, so a standing `gpg = false` is still escapable with
 `--gpg` for a single run. `docker = false` drops the socket *and* `DOCKER_HOST`, so nothing
 inside is left pointing at a socket that isn't there.
+
+The generated **system gitconfig** (see *What it does*) has the same shape of switch:
+
+```toml
+system_gitconfig = false   # default: on
+```
+
+or `--no-system-gitconfig` for one run. Leaving it on costs nothing — it is one generated
+file mounted read-only, and it sits at git's lowest precedence tier, so anything you set in
+`~/.gitconfig` or in a repo wins. Turn it off if you'd rather manage `core.checkStat`
+yourself, keeping in mind the sandbox will otherwise rewrite the index of every repo you
+touch. Note it governs *only* that generated file: `~/.gitconfig` is mounted read-only
+either way.
 
 The path is the key (so a path can't be listed twice), `~` and `$VAR` are expanded, and
 `"ro"` is shorthand for `{ mode = "ro" }`. Every path must exist — a missing one is a hard

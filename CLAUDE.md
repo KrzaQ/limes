@@ -114,7 +114,7 @@ pushed **least-to-most explicit**, then `dedupe()` collapses exact-path collisio
 *last wins*, then `sort_for_nesting()` orders parent-before-child:
 
 ```
-built-in defaults  →  detected agents  →  rosa  →  workspace (rw)  →  config.toml/config.d  →  --ro  →  --rw  →  --hide
+built-in defaults  →  detected agents  →  rosa  →  system gitconfig  →  workspace (rw)  →  config.toml/config.d  →  --ro  →  --rw  →  --hide
 ```
 
 So a config entry overrides an implicit default, a CLI flag overrides config, and `--rw`
@@ -128,6 +128,18 @@ each backend renders its own way (`-v`, `--tmpfs`, or an SBPL rule). `Kind` must
 less quietly breaks last-wins for a mode that carries more than read-only-ness. `Hide`
 *does* carry more: the host directory's mode, so a hidden path is never wider inside than
 out.
+
+`run.rs` also generates the **system gitconfig** (`identity::SYSTEM_GITCONFIG`, mounted
+same-path and named by `GIT_CONFIG_SYSTEM`), which is not a convenience: without
+`core.checkStat = minimal` every git command inside re-hashes the work tree and rewrites
+the index, because uid 0 does not match the uid the index recorded — the one piece of the
+`-u 0:0` fallout that isn't merely cosmetic. It is git's **lowest** tier on purpose, so
+`~/.gitconfig` (still mounted verbatim, ro) and any repo override it; it must never be set
+in the user's own config instead, where it would follow them onto the host and weaken a
+check that costs nothing there. Resolves like a forward (default on → config
+`system_gitconfig` → `--system-gitconfig`/`--no-system-gitconfig`) and reuses
+`forward::enabled`/`tri` for it, but deliberately does not join `Forwards` — it forwards
+nothing, and that module's "oracle, never key material" framing is worth keeping exact.
 
 **`forward.rs`** owns the four credential/socket forwards (ssh, gpg, rosa, docker) and
 resolves each one **built-in default (on) → config `[forward]` → CLI flag**, mirroring how

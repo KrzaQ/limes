@@ -52,6 +52,11 @@ pub struct Config {
     /// is a filesystem overlayfs won't stack on — see `util::unsupported_upperdir_fs`.
     #[serde(default)]
     data_root: Option<String>,
+    /// Whether to give the sandbox the generated system gitconfig (see
+    /// `identity::SYSTEM_GITCONFIG`); `None` means the built-in default, which is on.
+    /// `Option` for the same reason `Forward`'s fields are — field-by-field drop-in merge.
+    #[serde(default)]
+    system_gitconfig: Option<bool>,
 }
 
 /// Standing on/off switches for the credential and socket forwards.
@@ -155,6 +160,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
     let mut forward = Forward::default();
     let mut hostname_suffix: Option<String> = None;
     let mut data_root: Option<String> = None;
+    let mut system_gitconfig: Option<bool> = None;
     let mut found = false;
 
     if let Ok(entries) = std::fs::read_dir(ctx.config_d_dir()) {
@@ -169,6 +175,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
             forward.merge(cfg.forward);
             hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
             data_root = cfg.data_root.or(data_root);
+            system_gitconfig = cfg.system_gitconfig.or(system_gitconfig);
             found = true;
         }
     }
@@ -177,10 +184,17 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         forward.merge(cfg.forward);
         hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
         data_root = cfg.data_root.or(data_root);
+        system_gitconfig = cfg.system_gitconfig.or(system_gitconfig);
         found = true;
     }
 
-    Ok(found.then_some(Config { mounts: merged, forward, hostname_suffix, data_root }))
+    Ok(found.then_some(Config {
+        mounts: merged,
+        forward,
+        hostname_suffix,
+        data_root,
+        system_gitconfig,
+    }))
 }
 
 fn parse(path: &Path) -> Result<Config> {
@@ -210,6 +224,12 @@ impl Config {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn hostname_suffix(&self) -> Option<&str> {
         self.hostname_suffix.as_deref()
+    }
+
+    /// The standing system-gitconfig switch, for the CLI flag pair to override.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn system_gitconfig(&self) -> Option<bool> {
+        self.system_gitconfig
     }
 
     /// The configured data-root, expanded. Absolute is required: the path is written into

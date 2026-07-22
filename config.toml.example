@@ -61,6 +61,16 @@
 # rosa   = true    # sub rosa secret broker: socket + client binary
 # docker = false   # the limes docker socket (also drops DOCKER_HOST)
 
+# The sandbox gets its own *system* gitconfig setting `core.checkStat = minimal`, because
+# inside you are container uid 0 while the index on disk records your real uid — and git's
+# default stat check compares owners, so without it every `git status` re-hashes the work
+# tree and rewrites the index, which then makes the host do the same in reverse.
+#
+# On by default. It is git's lowest precedence tier, so your ~/.gitconfig (mounted ro,
+# untouched, and unaffected by this switch) and any repo's own config still win.
+# `--no-system-gitconfig` turns it off for one run.
+# system_gitconfig = false
+
 # Where the dedicated daemon keeps its images and layers. Defaults to
 # ~/.local/share/limes/docker; Linux-only (the macOS backend has no daemon and ignores it).
 #
