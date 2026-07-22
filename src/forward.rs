@@ -151,13 +151,19 @@ fn add_gpg_agent(p: &mut Pieces, ctx: &Context) {
     if !Path::new(&extra).exists() {
         return;
     }
-    let dest = format!("/run/user/{}/gnupg/S.gpg-agent", ctx.uid);
-    p.binds.push(Bind::new(extra, dest, false));
     // Ask gpg where it lives rather than assuming `~/.gnupg`, so `$GNUPGHOME` is honored —
     // we are already shelling out to `gpgconf` for the socket, so this costs one more call.
     // The fallback keeps the old behaviour for a gpg too old to answer.
     let homedir =
         gpgconf_dir("homedir").map(PathBuf::from).unwrap_or_else(|| ctx.home.join(".gnupg"));
+    // Into the *homedir*, not `/run/user/<uid>/gnupg`, because that is where the client
+    // inside will look. gnupg uses `/run/user/<uid>/gnupg` only when `/run/user/<uid>`
+    // exists and otherwise falls back to the homedir -- and the sandbox runs as uid 0,
+    // whose `/run/user/0` does not exist. Forwarding to the host uid's path put the socket
+    // somewhere nothing inside ever consulted: gpg found no agent, reported "No secret key"
+    // for a key the host signs with happily, and nothing named the socket.
+    let dest = homedir.join("S.gpg-agent");
+    p.binds.push(Bind::new(extra, dest.display().to_string(), false));
     p.binds.extend(gnupg_binds(&homedir));
 }
 
