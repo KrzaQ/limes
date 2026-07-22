@@ -134,6 +134,16 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     // it never drifts from Cargo.toml / `lim --version`.
     cmd.args(["-e", concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION"))]);
 
+    // The terminal is host state, so mirror it. `-t` otherwise makes Docker invent
+    // `TERM=xterm` — 8 colours — and a 256-colour prompt or a themed TUI renders washed out
+    // inside a sandbox that has the host's own terminfo mounted at /usr/share/terminfo.
+    // Passed before the user's `-e` below, so `--env TERM=…` still wins for one run.
+    for var in ["TERM", "COLORTERM"] {
+        if let Ok(v) = std::env::var(var) {
+            cmd.args(["-e", &format!("{var}={v}")]);
+        }
+    }
+
     // Security posture: no new privileges, drop all caps, read-only rootfs, seccomp
     // left enabled. Never --privileged — the sandbox bounds reach, it doesn't grant it.
     cmd.args(["--security-opt", "no-new-privileges"]);
