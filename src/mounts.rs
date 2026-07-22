@@ -182,6 +182,97 @@ pub fn resolve_hide(p: &Path) -> Result<Option<(PathBuf, u32)>> {
     Ok(Some((canonicalize(p)?, meta.mode())))
 }
 
+/// The mode Docker gives a directory it has to fabricate for a mount destination.
+const DOCKER_INVENTS_AT: u32 = 0o755;
+
+/// Directories the sandbox will *invent*, and the host mode each should carry.
+///
+/// The tmpfs `$HOME` starts empty, so Docker fabricates the whole ancestor chain of every
+/// bind destination under it — at 0755, whatever the host has. `~/.gnupg` arriving 0755
+/// instead of 0700 is why gpg warns about unsafe permissions on every invocation inside a
+/// sandbox; `~/.local` and `~/.local/share` are wrong the same way, and each same-path
+/// mount a future forward or agent adds repeats it silently.
+///
+/// The answer is not a list of paths to fix — that is another blocklist, with `hide`'s rot
+/// problem, asking for a preference where none exists. The correct mode is not a matter of
+/// taste, it is whatever the host has.
+///
+/// The predicate that matters is **"did Docker have to invent this?"** A directory arriving
+/// through a bind is the host's own inode and already carries the host's mode. "Is it a
+/// mount destination" is only an approximation of that — an ancestor *under* a bind was not
+/// invented either.
+///
+/// `mode_of` is injected so the rule stays testable against a fabricated host, the way
+/// `seatbelt` and `identity` stay testable off-platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn invented_dirs(
+    mounts: &[MountArg],
+    home: &Path,
+    mode_of: &dyn Fn(&Path) -> Option<u32>,
+) -> Vec<(PathBuf, u32)> {
+    // Destination, and whether it brings the host's own mode with it.
+    let dests: Vec<(PathBuf, bool)> = mounts
+        .iter()
+        .map(|m| match m {
+            MountArg::Bind(b) => (PathBuf::from(&b.dst), true),
+            MountArg::Tmpfs(t) => (PathBuf::from(&t.path), false),
+        })
+        .collect();
+
+    let mut out: Vec<(PathBuf, u32)> = Vec::new();
+    for (dst, _) in &dests {
+        for a in dst.ancestors().skip(1) {
+            // Strictly below `$HOME`. Excluding `$HOME` itself is deliberate, not luck:
+            // `run` pins it to `mode=1777` for reasons recorded there, and mirroring the
+            // host's 0755 onto it would quietly undo them.
+            if a == home || !a.starts_with(home) {
+                continue;
+            }
+            if out.iter().any(|(p, _)| p == a) || !is_invented(a, &dests) {
+                continue;
+            }
+            let Some(mode) = mode_of(a) else {
+                continue; // Nothing to mirror.
+            };
+            // What Docker would have made it anyway, so emitting only adds noise to
+            // `--dry-run` — and keeping the common case invisible there is worth a line.
+            if mode & 0o7777 == DOCKER_INVENTS_AT {
+                continue;
+            }
+            out.push((a.to_path_buf(), mode));
+        }
+    }
+    // Shallowest-first, for the reason `sort_for_nesting` gives: stable, diffable output.
+    out.sort_by(|(a, _), (b, _)| {
+        a.components().count().cmp(&b.components().count()).then_with(|| a.cmp(b))
+    });
+    out
+}
+
+/// Whether Docker has to fabricate `p`, rather than it arriving through a mount.
+fn is_invented(p: &Path, dests: &[(PathBuf, bool)]) -> bool {
+    // A mount of its own: a bind brings the host's mode with it, and a tmpfs was already
+    // given one — by `hide`, or by `invented_dirs` on an earlier pass.
+    if dests.iter().any(|(d, _)| d == p) {
+        return false;
+    }
+    // Otherwise the *deepest* mount it sits under decides. A bind supplies the directory
+    // from the host, mode included; a tmpfs — the `$HOME` one included — supplies nothing,
+    // which is exactly why the chain has to be fabricated in the first place.
+    dests
+        .iter()
+        .filter(|(d, _)| p.starts_with(d) && p != d)
+        .max_by_key(|(d, _)| d.components().count())
+        .is_none_or(|(_, from_host)| !*from_host)
+}
+
+/// `stat(2)`'s mode, or `None` when the path cannot be stat'd — the real `mode_of`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn host_mode(p: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p).ok().map(|m| m.mode())
+}
+
 /// Order mounts parent-before-child so nested holes apply correctly regardless of
 /// the order the user passed them. Docker sorts internally too, but we do it
 /// defensively and to make `--dry-run` output deterministic and readable.
@@ -228,6 +319,129 @@ mod tests {
         assert_eq!(
             Bind::new("/run/limes-passwd", "/etc/passwd", true).to_args(),
             ["-v", "/run/limes-passwd:/etc/passwd:ro"]
+        );
+    }
+
+    const HOME: &str = "/home/u";
+
+    fn bind(dst: &str) -> MountArg {
+        MountArg::Bind(Bind::new(dst, dst, true))
+    }
+
+    fn tmpfs(path: &str) -> MountArg {
+        MountArg::Tmpfs(Tmpfs::new(Path::new(path), "mode=0700"))
+    }
+
+    /// A fabricated host: only the paths named here exist, with the modes given. Anything
+    /// else is unstattable, which is the `None` branch of the rule.
+    fn host(modes: &'static [(&'static str, u32)]) -> impl Fn(&Path) -> Option<u32> {
+        move |p: &Path| modes.iter().find(|(path, _)| Path::new(path) == p).map(|(_, mode)| *mode)
+    }
+
+    fn invented(mounts: &[MountArg], modes: &'static [(&'static str, u32)]) -> Vec<(PathBuf, u32)> {
+        invented_dirs(mounts, Path::new(HOME), &host(modes))
+    }
+
+    /// The motivating case: `~/.gnupg` exists only because Docker fabricates it to hang the
+    /// pubring bind on, so it must not land 0755 when the host says 0700.
+    #[test]
+    fn an_invented_ancestor_takes_the_hosts_mode() {
+        assert_eq!(
+            invented(&[bind("/home/u/.gnupg/pubring.kbx")], &[("/home/u/.gnupg", 0o40700)]),
+            vec![(PathBuf::from("/home/u/.gnupg"), 0o40700)]
+        );
+    }
+
+    /// `$HOME` is pinned to `mode=1777` by `run` on purpose; mirroring the host's mode onto
+    /// it would quietly undo that, so it must never appear however the walk is written.
+    #[test]
+    fn home_itself_is_never_emitted() {
+        let out = invented(
+            &[tmpfs(HOME), bind("/home/u/.gnupg/pubring.kbx")],
+            &[(HOME, 0o40700), ("/home/u/.gnupg", 0o40700)],
+        );
+        assert!(out.iter().all(|(p, _)| p != Path::new(HOME)), "{out:?}");
+    }
+
+    /// Outside `$HOME` the container's filesystem is the image plus the `/usr` mirror, not
+    /// an empty tmpfs — a deliberate scope, so the gpg socket's `/run/user/$uid` is left be.
+    #[test]
+    fn a_destination_outside_home_yields_nothing() {
+        assert!(
+            invented(&[bind("/run/user/1000/gnupg/S.gpg-agent")], &[("/run/user/1000", 0o40700)])
+                .is_empty()
+        );
+    }
+
+    /// A bind's own destination arrives as the host's inode, mode included.
+    #[test]
+    fn an_ancestor_that_is_itself_a_bind_is_skipped() {
+        assert!(
+            invented(
+                &[bind("/home/u/.config"), bind("/home/u/.config/opencode")],
+                &[("/home/u/.config", 0o40700)]
+            )
+            .is_empty()
+        );
+    }
+
+    /// The rule that "is it a mount destination" only approximates. `~/.config/gh` is not
+    /// itself mounted, but it arrives *through* the `~/.config` bind — so it was never
+    /// invented, already has the host's mode, and sits on a read-only mount besides.
+    #[test]
+    fn an_ancestor_reached_through_a_bind_is_skipped() {
+        assert!(
+            invented(
+                &[bind("/home/u/.config"), bind("/home/u/.config/gh/hosts.yml")],
+                &[("/home/u/.config", 0o40700), ("/home/u/.config/gh", 0o40700),]
+            )
+            .is_empty()
+        );
+    }
+
+    /// The mirror image: a tmpfs supplies nothing, so a directory under one *is* invented.
+    /// This is what stops a `hide` from hiding the rule as well as the contents.
+    #[test]
+    fn an_ancestor_reached_through_a_tmpfs_is_still_emitted() {
+        assert_eq!(
+            invented(
+                &[tmpfs("/home/u/.config"), bind("/home/u/.config/gh/hosts.yml")],
+                &[("/home/u/.config/gh", 0o40700)]
+            ),
+            vec![(PathBuf::from("/home/u/.config/gh"), 0o40700)]
+        );
+    }
+
+    /// 0755 is what Docker makes it anyway, so emitting would be noise in `--dry-run`.
+    #[test]
+    fn an_ancestor_docker_would_get_right_is_skipped() {
+        assert!(
+            invented(&[bind("/home/u/.ssh/known_hosts")], &[("/home/u/.ssh", 0o40755)]).is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unstattable_ancestor_is_skipped() {
+        assert!(invented(&[bind("/home/u/.gnupg/pubring.kbx")], &[]).is_empty());
+    }
+
+    /// Two mounts sharing a chain must not emit it twice, and the output is shallowest-first
+    /// so `--dry-run` reads in nesting order and diffs cleanly between runs.
+    #[test]
+    fn a_shared_chain_is_emitted_once_shallowest_first() {
+        assert_eq!(
+            invented(
+                &[bind("/home/u/.local/bin/claude"), bind("/home/u/.local/share/claude")],
+                &[
+                    ("/home/u/.local", 0o40700),
+                    ("/home/u/.local/bin", 0o40755),
+                    ("/home/u/.local/share", 0o40700),
+                ]
+            ),
+            vec![
+                (PathBuf::from("/home/u/.local"), 0o40700),
+                (PathBuf::from("/home/u/.local/share"), 0o40700),
+            ]
         );
     }
 

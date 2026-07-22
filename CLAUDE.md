@@ -54,6 +54,15 @@ These are load-bearing; breaking one silently defeats the tool.
   `Mount` in `mounts.rs` has no notion of a differing destination — the few things that do
   need a different destination (SSH/GPG sockets, the docker socket) build their `-v` args by
   hand in `run.rs`.
+- **The sandbox never invents a directory mode.** The tmpfs `$HOME` starts empty, so Docker
+  fabricates the ancestor chain of every mount under it — at 0755, whatever the host has.
+  That is why `~/.gnupg` used to arrive 0755 and gpg warned about unsafe permissions on every
+  invocation. `mounts::invented_dirs` emits a mode-pinned `--tmpfs` for each such directory,
+  and `Kind::Hide` carries its host mode for the same reason. **Declared, not chmod'd**: a
+  prelude `chmod` would be invisible to `policy`'s join diff, and `sandbox::initialize`
+  discards stderr unless the script's *last* command fails, so a wrong skip rule would be
+  silent rather than noisy. The predicate is "did Docker have to invent this?" — a directory
+  reached *through* a bind was not, so "is it a mount destination" only approximates it.
 - **Never `--privileged`.** The container runs with `--read-only` rootfs, `--cap-drop ALL`,
   `no-new-privileges`, seccomp on, with tmpfs `/tmp` and tmpfs `$HOME`.
 - **`-u 0:0`, and that *is* the invoking user.** The rootless daemon's user namespace maps

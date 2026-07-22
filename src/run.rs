@@ -156,6 +156,9 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     // pinned so the mode never depends on the uid. Matches /tmp, which the image chmods.
     mounts.push(MountArg::Tmpfs(Tmpfs::new(Path::new("/tmp"), "exec")));
     mounts.push(MountArg::Tmpfs(Tmpfs::new(&ctx.home, "exec,mode=1777")));
+    // Everything above is scaffolding that exists before any host path is mirrored, which
+    // is what makes it the right place to splice the invented directories into below.
+    let scaffolding = mounts.len();
 
     // Forwarded credentials & sockets, then the table. The table comes last so its
     // depth-sorted order survives into the arg list, which is what layers a `hide` over
@@ -163,6 +166,24 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     let pieces = forward::pieces(ctx, &forwards);
     mounts.extend(pieces.binds.into_iter().map(MountArg::Bind));
     mounts.extend(table.iter().map(Mount::flatten));
+
+    // Give every directory Docker has to fabricate under the tmpfs $HOME the mode its host
+    // counterpart has, instead of the 0755 Docker invents. See `mounts::invented_dirs` —
+    // without it `~/.gnupg` lands 0755 and gpg warns about unsafe permissions on every
+    // invocation. Declared as a tmpfs rather than chmod'd in the prelude so it lands in
+    // `docker inspect`, and `policy` therefore compares it when joining for free.
+    //
+    // `exec` because Docker's --tmpfs defaults include `noexec` and `~/.local` holds
+    // binaries — the same reason the $HOME tmpfs above passes it.
+    let invented: Vec<MountArg> = mounts::invented_dirs(&mounts, &ctx.home, &mounts::host_mode)
+        .into_iter()
+        .map(|(p, mode)| {
+            MountArg::Tmpfs(Tmpfs::new(&p, &format!("exec,{}", mounts::mode_opt(mode))))
+        })
+        .collect();
+    // Spliced in shallowest-first ahead of the mounts they hold, so `--dry-run` reads in
+    // nesting order. Docker sorts destinations itself, so this is for the reader.
+    mounts.splice(scaffolding..scaffolding, invented);
 
     let mut env = vec![
         format!("HOME={}", ctx.home.display()),

@@ -30,6 +30,11 @@ If you need to contain a hostile process, use a VM, not this.
   `--ro ~/code --rw ~/code/project` makes `~/code` read-only with a writable window.
 - **Ephemeral by construction**: read-only rootfs, a tmpfs `/tmp`, and a tmpfs `$HOME`.
   Nothing persists except your explicit `--rw` mounts, and `~/.claude`.
+- **Mirrors directory permissions, not just contents.** A tmpfs `$HOME` starts empty, so the
+  parent directories of anything mounted under it have to be created — and a container
+  runtime creates them `0755` whatever your host says. `limes` gives each one the mode its
+  host counterpart has, so `~/.gnupg` arrives `0700` (gpg refuses to stop warning otherwise)
+  and so does `~/.local`.
 - **One sandbox per workspace.** A second `lim` in the same directory *joins* the first
   rather than building another beside it — two terminals on your host are two shells on one
   machine, and inside they likewise share `$HOME`, `/tmp` and the process table. The
