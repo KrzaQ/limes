@@ -17,7 +17,7 @@ use std::process::Command;
 use crate::RunArgs;
 use crate::config;
 use crate::context::Context;
-use crate::mounts::Mount;
+use crate::mounts::{Bind, Mount};
 use crate::util::find_in_path;
 
 /// Which forwards are live for this run.
@@ -98,38 +98,50 @@ pub fn rosa_mounts(ctx: &Context, on: bool) -> Vec<Mount> {
     m
 }
 
-/// Add every enabled forward's non-`Mount` pieces: the sockets whose destination differs
-/// from their source, and the env vars that point tools at them.
-pub fn apply(cmd: &mut Command, ctx: &Context, f: &Forwards) {
+/// Every enabled forward's non-`Mount` pieces: the sockets whose destination differs from
+/// their source, and the env vars that point tools at them.
+///
+/// Returned rather than pushed straight onto a `Command`, so that everything docker will
+/// see ends up in one `RunSpec`. Comparing a running sandbox against a requested policy
+/// means enumerating *all* of it; a forward that emitted its own args directly would be
+/// invisible to that comparison, and would go on being invisible as forwards are added.
+#[derive(Default)]
+pub struct Pieces {
+    pub binds: Vec<Bind>,
+    pub env: Vec<String>,
+}
+
+pub fn pieces(ctx: &Context, f: &Forwards) -> Pieces {
+    let mut p = Pieces::default();
     if f.ssh {
-        add_ssh_agent(cmd);
+        add_ssh_agent(&mut p);
     }
     if f.gpg {
-        add_gpg_agent(cmd, ctx);
+        add_gpg_agent(&mut p, ctx);
     }
     if f.rosa {
-        add_rosa_env(cmd, ctx);
+        add_rosa_env(&mut p, ctx);
     }
     if f.docker {
-        add_docker_socket(cmd, ctx);
+        add_docker_socket(&mut p, ctx);
     }
+    p
 }
 
 /// Forward the SSH agent (a signing oracle, not the keys).
-fn add_ssh_agent(cmd: &mut Command) {
+fn add_ssh_agent(p: &mut Pieces) {
     if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
         let sock = Path::new(&sock);
         if sock.exists() {
-            let s = sock.display();
-            cmd.args(["-v", &format!("{s}:{s}")]);
-            cmd.args(["-e", "SSH_AUTH_SOCK"]);
+            p.binds.push(Bind::same_path(sock, false));
+            p.env.push("SSH_AUTH_SOCK".into());
         }
     }
 }
 
 /// Forward the GPG *extra* (restricted) socket onto the container's normal agent
 /// socket path, plus the public keyring read-only. Secret keys stay in the host agent.
-fn add_gpg_agent(cmd: &mut Command, ctx: &Context) {
+fn add_gpg_agent(p: &mut Pieces, ctx: &Context) {
     let Ok(out) = Command::new("gpgconf").args(["--list-dir", "agent-extra-socket"]).output()
     else {
         return;
@@ -142,11 +154,10 @@ fn add_gpg_agent(cmd: &mut Command, ctx: &Context) {
         return;
     }
     let dest = format!("/run/user/{}/gnupg/S.gpg-agent", ctx.uid);
-    cmd.args(["-v", &format!("{extra}:{dest}")]);
+    p.binds.push(Bind::new(extra, dest, false));
     let pubring = ctx.home.join(".gnupg/pubring.kbx");
     if pubring.exists() {
-        let p = pubring.display();
-        cmd.args(["-v", &format!("{p}:{p}:ro")]);
+        p.binds.push(Bind::same_path(&pubring, true));
     }
 }
 
@@ -154,20 +165,19 @@ fn add_gpg_agent(cmd: &mut Command, ctx: &Context) {
 /// relying on rosa's own fallback would make resolution depend on a variable that isn't
 /// there; naming the path removes the guesswork. The mount itself is a `Mount` (see
 /// `rosa_mounts`) because it is same-path.
-fn add_rosa_env(cmd: &mut Command, ctx: &Context) {
+fn add_rosa_env(p: &mut Pieces, ctx: &Context) {
     let sock = rosa_socket(ctx);
     if sock.exists() {
-        cmd.args(["-e", &format!("ROSA_SOCK={}", sock.display())]);
+        p.env.push(format!("ROSA_SOCK={}", sock.display()));
     }
 }
 
 /// Mount the limes daemon's own socket into the container as the normal docker
 /// socket, so tools inside drive the same daemon (docker-outside-of-docker). Nothing
 /// is nested: fixtures the sandbox starts are siblings on the limes daemon, not dind.
-fn add_docker_socket(cmd: &mut Command, ctx: &Context) {
-    let sock = ctx.socket();
-    cmd.args(["-v", &format!("{}:/var/run/docker.sock", sock.display())]);
-    cmd.args(["-e", "DOCKER_HOST=unix:///var/run/docker.sock"]);
+fn add_docker_socket(p: &mut Pieces, ctx: &Context) {
+    p.binds.push(Bind::new(ctx.socket().display().to_string(), "/var/run/docker.sock", false));
+    p.env.push("DOCKER_HOST=unix:///var/run/docker.sock".into());
 }
 
 #[cfg(test)]

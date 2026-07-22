@@ -45,24 +45,85 @@ impl Mount {
         Self { path: p, kind: Kind::Hide }
     }
 
-    /// The docker flag pair for this mount.
+    /// Lower this policy to the docker-level view: a same-path bind, or a tmpfs shadow.
     ///
-    /// Returns the whole pair rather than a bare `-v` value, because not every mode is a
-    /// bind: `Hide` is a `--tmpfs`. `Ro`/`Rw` stay same-path (`/path:/path[:ro]`) so
-    /// absolute paths baked into build artifacts (compile_commands.json, ccache,
-    /// diagnostics) stay valid on both sides.
+    /// `Ro`/`Rw` stay same-path (`/path:/path[:ro]`) so absolute paths baked into build
+    /// artifacts (compile_commands.json, ccache, diagnostics) stay valid on both sides.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub fn to_args(&self) -> Vec<String> {
-        let p = self.path.display();
+    pub fn flatten(&self) -> MountArg {
         match self.kind {
-            Kind::Ro => vec!["-v".into(), format!("{p}:{p}:ro")],
+            Kind::Ro => MountArg::Bind(Bind::same_path(&self.path, true)),
+            Kind::Rw => MountArg::Bind(Bind::same_path(&self.path, false)),
             // An empty tmpfs shadows whatever the parent bind put there, and unlike binding
             // an empty directory it needs no host path to point at. Docker's --tmpfs
             // defaults (rw,noexec,nosuid,nodev) are what a hidden dir wants; `mode` is
             // pinned explicitly for the same reason `run`'s $HOME tmpfs pins it — so the
             // result never depends on which uid the container happens to run as.
-            Kind::Hide => vec!["--tmpfs".into(), format!("{p}:mode=0755")],
-            Kind::Rw => vec!["-v".into(), format!("{p}:{p}")],
+            Kind::Hide => MountArg::Tmpfs(Tmpfs::new(&self.path, "mode=0755")),
+        }
+    }
+}
+
+/// One entry as docker actually sees it. This is the level `docker inspect` reports at —
+/// `Mounts` for the binds, `HostConfig.Tmpfs` for the rest — which is what lets a running
+/// container be compared against a requested policy without a fingerprint label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub enum MountArg {
+    Bind(Bind),
+    Tmpfs(Tmpfs),
+}
+
+/// A bind with an explicit destination.
+///
+/// Same-path is still the rule — `Mount` models it and everything user-facing goes through
+/// that. This exists for the short list that legitimately differs: the generated
+/// `/etc/passwd` and `/etc/group`, and the gpg and docker sockets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bind {
+    pub src: String,
+    pub dst: String,
+    pub ro: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tmpfs {
+    pub path: String,
+    pub opts: String,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl Bind {
+    pub fn same_path(p: &Path, ro: bool) -> Self {
+        let p = p.display().to_string();
+        Self { src: p.clone(), dst: p, ro }
+    }
+    pub fn new(src: impl Into<String>, dst: impl Into<String>, ro: bool) -> Self {
+        Self { src: src.into(), dst: dst.into(), ro }
+    }
+    pub fn to_args(&self) -> Vec<String> {
+        let Self { src, dst, ro } = self;
+        let spec = if *ro { format!("{src}:{dst}:ro") } else { format!("{src}:{dst}") };
+        vec!["-v".into(), spec]
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl Tmpfs {
+    pub fn new(path: &Path, opts: &str) -> Self {
+        Self { path: path.display().to_string(), opts: opts.into() }
+    }
+    pub fn to_args(&self) -> Vec<String> {
+        vec!["--tmpfs".into(), format!("{}:{}", self.path, self.opts)]
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl MountArg {
+    pub fn to_args(&self) -> Vec<String> {
+        match self {
+            MountArg::Bind(b) => b.to_args(),
+            MountArg::Tmpfs(t) => t.to_args(),
         }
     }
 }
@@ -116,13 +177,22 @@ pub fn sort_for_nesting(mounts: &mut [Mount]) {
 mod tests {
     use super::*;
 
-    /// The flag pair per kind. `Hide` is the reason `to_args` returns a `Vec` at all:
-    /// it is not a `-v`, so a bare bind-spec string could not express it.
+    /// The flag pair per kind. `Hide` is the reason a `Mount` cannot lower to a bare
+    /// bind-spec string: it is a `--tmpfs`, not a `-v`.
     #[test]
-    fn to_args_renders_each_kind() {
-        assert_eq!(Mount::ro("/a".into()).to_args(), ["-v", "/a:/a:ro"]);
-        assert_eq!(Mount::rw("/a".into()).to_args(), ["-v", "/a:/a"]);
-        assert_eq!(Mount::hide("/a".into()).to_args(), ["--tmpfs", "/a:mode=0755"]);
+    fn flatten_renders_each_kind() {
+        assert_eq!(Mount::ro("/a".into()).flatten().to_args(), ["-v", "/a:/a:ro"]);
+        assert_eq!(Mount::rw("/a".into()).flatten().to_args(), ["-v", "/a:/a"]);
+        assert_eq!(Mount::hide("/a".into()).flatten().to_args(), ["--tmpfs", "/a:mode=0755"]);
+    }
+
+    /// The escape hatch for the few mounts whose destination legitimately differs.
+    #[test]
+    fn a_bind_can_name_a_differing_destination() {
+        assert_eq!(
+            Bind::new("/run/limes-passwd", "/etc/passwd", true).to_args(),
+            ["-v", "/run/limes-passwd:/etc/passwd:ro"]
+        );
     }
 
     /// Missing is a no-op, not an error — the documented exemption from must-exist.

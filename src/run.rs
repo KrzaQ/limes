@@ -9,7 +9,7 @@
 //! `Vec<Mount>` produced by the same precedence chain; only the final translation differs
 //! — docker flags on one side, SBPL rules on the other.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
@@ -23,6 +23,8 @@ use crate::context::{self, Context};
 #[cfg(target_os = "linux")]
 use crate::identity;
 use crate::mounts::{self, Mount};
+#[cfg(target_os = "linux")]
+use crate::mounts::{Bind, MountArg, Tmpfs};
 
 #[cfg(target_os = "linux")]
 use crate::context::{IMAGE_TAG, LABEL};
@@ -78,8 +80,36 @@ fn assemble_mounts(
     Ok((mounts, symlinks))
 }
 
+/// Everything docker will be told about this sandbox, in one value.
+///
+/// Assembled up front rather than pushed onto a `Command` as each piece is computed,
+/// because joining a running sandbox has to compare a *requested* policy against a
+/// *running* one. That comparison must enumerate all of it — the mount table, the identity
+/// binds, the forwarded sockets, the scratch tmpfs, the hostname — and any piece that
+/// emitted its own args on the side would be silently missing from it, and would stay
+/// missing as more pieces are added.
+///
+/// Deliberately absent: `TERM`/`COLORTERM`, which describe the terminal a *shell* is
+/// attached to rather than the sandbox, and are passed per-exec.
 #[cfg(target_os = "linux")]
-pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
+pub struct RunSpec {
+    pub name: String,
+    pub hostname: String,
+    pub workspace: PathBuf,
+    /// Every mount docker will make, in emission order: the identity binds, the scratch
+    /// tmpfs, the forwarded sockets, then the deduped depth-sorted table. Relative order
+    /// within this list is load-bearing — it is what layers a `hide` over its parent.
+    pub mounts: Vec<MountArg>,
+    pub env: Vec<String>,
+    pub labels: Vec<String>,
+    pub symlinks: Vec<config::SymlinkSpec>,
+    pub cmd: Vec<String>,
+}
+
+/// Resolve the whole sandbox policy. Also returns the detected agent names, which are for
+/// the user-facing message only and deliberately not part of the spec.
+#[cfg(target_os = "linux")]
+fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     let workspace = std::env::current_dir()?;
 
     // Config feeds both the mounts below and the forwards further down, so load it once
@@ -89,42 +119,18 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
 
     // Auto-detected agents (program files ro, state dirs rw), plus rosa's socket and
     // client binary — both same-path, so they ride the normal precedence chain rather
-    // than being bolted on as raw `-v` args the way ssh/gpg have to be.
+    // than being bolted on as raw binds the way ssh/gpg have to be.
     let detected = agents::detect(ctx, args);
     let mut extra = detected.mounts.clone();
     extra.extend(forward::rosa_mounts(ctx, forwards.rosa));
-    let (mounts, mut symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
+    let (table, mut symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
     // An agent's launcher symlink is recreated the same way config's `link = "parent"`
     // entries are — one prelude, one mechanism.
     symlinks.extend(detected.symlinks);
 
-    // ── docker run ──────────────────────────────────────────────────
-    let mut cmd = docker::command(ctx);
-    cmd.arg("run").arg("--rm").arg("-it");
-
-    // Identity: run as the human, with a matching HOME.
-    //
-    // `-u 0:0` is that human, not root. The rootless daemon's user namespace maps the
-    // invoking user to container uid 0; container uids 1.. come from the subuid range and
-    // own none of the host's files, so `-u {uid}:{gid}` produces a sandbox where the
-    // workspace, `~/.claude` and every 0700 dotfile are unreadable and unwritable. Do not
-    // "fix" this back. It is safe only because `docker::command` pins every call to limes'
-    // own rootless daemon — against a rootful one this would be real root, which is what
-    // `doctor`'s rootless check guards. --cap-drop/no-new-privileges/read-only still apply.
-    cmd.args(["-u", "0:0"]);
-    cmd.args(["-e", &format!("HOME={}", ctx.home.display())]);
-    cmd.args(["-w", &path_str(&workspace)]);
-
-    // Mirror the host's hostname. Without this the sandbox reports the container ID, which
-    // changes every run and reads as noise. CLI beats config, as everywhere else.
-    let suffix =
-        args.hostname_suffix.as_deref().or_else(|| cfg.as_ref().and_then(|c| c.hostname_suffix()));
-    cmd.args(["--hostname", &context::sandbox_hostname(&ctx.hostname, suffix)?]);
-
-    // ...and uid 0 has to *look* like the human, or `whoami` says root and every mounted
-    // file lists as root. These are the only mounts whose destination differs from their
-    // source, so — like the gpg and docker sockets in `forward.rs` — they are raw `-v` args
-    // rather than `Mount`s, which model same-path binds only.
+    // uid 0 has to *look* like the human, or `whoami` says root and every mounted file
+    // lists as root. These, with the gpg and docker sockets in `forward.rs`, are the only
+    // mounts whose destination differs from their source.
     std::fs::write(
         ctx.passwd_file(),
         identity::passwd(&read_etc("/etc/passwd"), ctx.uid, &ctx.home),
@@ -132,29 +138,10 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     .with_context(|| format!("writing {}", ctx.passwd_file().display()))?;
     std::fs::write(ctx.group_file(), identity::group(&read_etc("/etc/group"), ctx.gid))
         .with_context(|| format!("writing {}", ctx.group_file().display()))?;
-    cmd.args(["-v", &format!("{}:/etc/passwd:ro", ctx.passwd_file().display())]);
-    cmd.args(["-v", &format!("{}:/etc/group:ro", ctx.group_file().display())]);
-
-    // Marker so shells/scripts/tooling inside can tell they're in a limes sandbox:
-    // presence means "inside limes", value is the version. It's the crate version, so
-    // it never drifts from Cargo.toml / `lim --version`.
-    cmd.args(["-e", concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION"))]);
-
-    // The terminal is host state, so mirror it. `-t` otherwise makes Docker invent
-    // `TERM=xterm` — 8 colours — and a 256-colour prompt or a themed TUI renders washed out
-    // inside a sandbox that has the host's own terminfo mounted at /usr/share/terminfo.
-    // Passed before the user's `-e` below, so `--env TERM=…` still wins for one run.
-    for var in ["TERM", "COLORTERM"] {
-        if let Ok(v) = std::env::var(var) {
-            cmd.args(["-e", &format!("{var}={v}")]);
-        }
-    }
-
-    // Security posture: no new privileges, drop all caps, read-only rootfs, seccomp
-    // left enabled. Never --privileged — the sandbox bounds reach, it doesn't grant it.
-    cmd.args(["--security-opt", "no-new-privileges"]);
-    cmd.args(["--cap-drop", "ALL"]);
-    cmd.arg("--read-only");
+    let mut mounts = vec![
+        MountArg::Bind(Bind::new(path_str(&ctx.passwd_file()), "/etc/passwd", true)),
+        MountArg::Bind(Bind::new(path_str(&ctx.group_file()), "/etc/group", true)),
+    ];
 
     // Writable, ephemeral scratch: /tmp and an empty HOME the shell can write to.
     // The bind mounts below layer real dotfiles/state on top of the HOME tmpfs.
@@ -162,46 +149,138 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     // `mode=1777` is belt-and-braces. A tmpfs defaults to 1777, but when `-w` names a path
     // *inside* it — which it does whenever the workspace lives under $HOME — Docker creates
     // that directory chain and leaves the tmpfs root owned by uid 0 at 0755. That is
-    // harmless while we run as uid 0, but it silently breaks the symlink prelude below (and
+    // harmless while we run as uid 0, but it silently breaks the symlink prelude (and
     // anything else writing to $HOME) the moment the container user is anyone else. Keep it
     // pinned so the mode never depends on the uid. Matches /tmp, which the image chmods.
-    cmd.args(["--tmpfs", "/tmp:exec"]);
-    cmd.args(["--tmpfs", &format!("{}:exec,mode=1777", ctx.home.display())]);
+    mounts.push(MountArg::Tmpfs(Tmpfs::new(Path::new("/tmp"), "exec")));
+    mounts.push(MountArg::Tmpfs(Tmpfs::new(&ctx.home, "exec,mode=1777")));
 
-    // Labels — what makes status/exec/stop/prune possible.
-    let name = args.name.clone().unwrap_or_else(|| derive_name(&workspace));
-    cmd.args(["--name", &name]);
-    cmd.args(["--label", &format!("{LABEL}=1")]);
-    cmd.args(["--label", &format!("{LABEL}.workspace={}", workspace.display())]);
-    cmd.args(["--label", &format!("{LABEL}.cmd={}", cmd_label(args))]);
+    // Forwarded credentials & sockets, then the table. The table comes last so its
+    // depth-sorted order survives into the arg list, which is what layers a `hide` over
+    // the parent mount it punches a hole in.
+    let pieces = forward::pieces(ctx, &forwards);
+    mounts.extend(pieces.binds.into_iter().map(MountArg::Bind));
+    mounts.extend(table.iter().map(Mount::flatten));
 
-    // Forwarded credentials & sockets. Before the user env passthrough below, so an
-    // explicit `-e` still wins over anything a forward sets.
-    forward::apply(&mut cmd, ctx, &forwards);
+    let mut env = vec![
+        format!("HOME={}", ctx.home.display()),
+        // Marker so shells/scripts/tooling inside can tell they're in a limes sandbox:
+        // presence means "inside limes", value is the version. It's the crate version, so
+        // it never drifts from Cargo.toml / `lim --version`.
+        concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION")).to_string(),
+    ];
+    // Forward env before the user's, so an explicit `-e` still wins over what a forward sets.
+    env.extend(pieces.env);
+    env.extend(args.env.iter().cloned());
 
-    // User env passthrough.
-    for e in &args.env {
-        cmd.args(["-e", e]);
+    // Mirror the host's hostname. Without this the sandbox reports the container ID, which
+    // changes every run and reads as noise. CLI beats config, as everywhere else.
+    let suffix =
+        args.hostname_suffix.as_deref().or_else(|| cfg.as_ref().and_then(|c| c.hostname_suffix()));
+
+    let spec = RunSpec {
+        name: args.name.clone().unwrap_or_else(|| derive_name(&workspace)),
+        hostname: context::sandbox_hostname(&ctx.hostname, suffix)?,
+        // Labels — what makes status/exec/stop/prune possible.
+        labels: vec![
+            format!("{LABEL}=1"),
+            format!("{LABEL}.workspace={}", workspace.display()),
+            format!("{LABEL}.cmd={}", cmd_label(args)),
+        ],
+        workspace,
+        mounts,
+        env,
+        symlinks,
+        cmd: if args.cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { args.cmd.clone() },
+    };
+    Ok((spec, detected.names))
+}
+
+#[cfg(target_os = "linux")]
+impl RunSpec {
+    /// Render as `docker run` arguments (everything after `docker --host …`).
+    ///
+    /// `extra_env` carries the per-shell variables that are deliberately not part of the
+    /// spec — see `term_env`. They land after the spec's own env and before the mounts, so
+    /// they are still container flags rather than part of the command.
+    fn to_run_args(&self, extra_env: &[String]) -> Vec<String> {
+        let mut a: Vec<String> = ["run", "--rm", "-it"].iter().map(|s| s.to_string()).collect();
+
+        // Identity: run as the human, with a matching HOME.
+        //
+        // `-u 0:0` is that human, not root. The rootless daemon's user namespace maps the
+        // invoking user to container uid 0; container uids 1.. come from the subuid range
+        // and own none of the host's files, so `-u {uid}:{gid}` produces a sandbox where the
+        // workspace, `~/.claude` and every 0700 dotfile are unreadable and unwritable. Do not
+        // "fix" this back. It is safe only because `docker::command` pins every call to
+        // limes' own rootless daemon — against a rootful one this would be real root, which
+        // is what `doctor`'s rootless check guards. The posture below still applies.
+        push(&mut a, ["-u", "0:0"]);
+        push(&mut a, ["-w", &path_str(&self.workspace)]);
+        push(&mut a, ["--hostname", &self.hostname]);
+
+        // Security posture: no new privileges, drop all caps, read-only rootfs, seccomp
+        // left enabled. Never --privileged — the sandbox bounds reach, it doesn't grant it.
+        push(&mut a, ["--security-opt", "no-new-privileges"]);
+        push(&mut a, ["--cap-drop", "ALL"]);
+        a.push("--read-only".into());
+
+        push(&mut a, ["--name", &self.name]);
+        for l in &self.labels {
+            push(&mut a, ["--label", l]);
+        }
+        for e in self.env.iter().chain(extra_env) {
+            push(&mut a, ["-e", e]);
+        }
+        for m in &self.mounts {
+            a.extend(m.to_args());
+        }
+
+        a.push(IMAGE_TAG.into());
+        a.extend(self.entrypoint());
+        a
     }
 
-    // The mount table. Each entry renders its own flag pair — `-v` for the binds,
-    // `--tmpfs` for a `hide` — so a mode is never forced into being a bind.
-    for m in &mounts {
-        cmd.args(m.to_args());
-    }
-
-    cmd.arg(IMAGE_TAG);
-    let inner: Vec<String> =
-        if args.cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { args.cmd.clone() };
-    if symlinks.is_empty() {
-        cmd.args(&inner);
-    } else {
+    /// The command the container runs, with the symlink prelude in front when there is one.
+    fn entrypoint(&self) -> Vec<String> {
+        if self.symlinks.is_empty() {
+            return self.cmd.clone();
+        }
         // docker flattens symlinks on mount, so recreate the host's home symlinks in the
         // tmpfs home before exec'ing — this is what makes self-locating config (e.g. zsh
         // plugin paths derived from ~/.zshrc's own resolved location) work in the sandbox.
-        cmd.args(["sh", "-c", &symlink_prelude(&symlinks), "limes"]);
-        cmd.args(&inner);
+        let mut v: Vec<String> =
+            vec!["sh".into(), "-c".into(), symlink_prelude(&self.symlinks), "limes".into()];
+        v.extend(self.cmd.iter().cloned());
+        v
     }
+}
+
+#[cfg(target_os = "linux")]
+fn push(out: &mut Vec<String>, pair: [&str; 2]) {
+    out.extend(pair.iter().map(|s| s.to_string()));
+}
+
+/// The terminal is host state, so mirror it. `-t` otherwise makes Docker invent
+/// `TERM=xterm` — 8 colours — and a 256-colour prompt or a themed TUI renders washed out
+/// inside a sandbox that has the host's own terminfo mounted at /usr/share/terminfo.
+///
+/// Kept out of `RunSpec` on purpose: these describe the terminal a given *shell* is
+/// attached to, not the sandbox, and a second shell can be attached to a different one.
+#[cfg(target_os = "linux")]
+fn term_env() -> Vec<String> {
+    ["TERM", "COLORTERM"]
+        .iter()
+        .filter_map(|var| std::env::var(var).ok().map(|v| format!("{var}={v}")))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
+    let (spec, agent_names) = build_spec(ctx, args)?;
+
+    let mut cmd = docker::command(ctx);
+    cmd.args(spec.to_run_args(&term_env()));
 
     if args.dry_run {
         println!("{}", render(&cmd));
@@ -209,8 +288,8 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     }
 
     preflight(ctx)?;
-    if !detected.names.is_empty() {
-        eprintln!("limes: agents available: {}", detected.names.join(", "));
+    if !agent_names.is_empty() {
+        eprintln!("limes: agents available: {}", agent_names.join(", "));
     }
     docker::run(cmd)
 }
