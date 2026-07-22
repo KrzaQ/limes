@@ -421,7 +421,13 @@ fn default_mounts(ctx: &Context) -> Vec<Mount> {
     // `passwd`/`group` are deliberately absent: `run` mounts generated ones instead, so that
     // container uid 0 resolves to the invoking user. The trade is that files owned by *other*
     // host users render as bare numeric uids inside, which is the lesser confusion.
-    for p in ["/etc/ssl", "/etc/ld.so.cache", "/etc/localtime"] {
+    //
+    // `/etc/alternatives` is Debian's indirection layer, and without it a Debian host's
+    // /usr is half-broken inside: `/usr/bin/vim` is a symlink to `/etc/alternatives/vim`,
+    // as are `editor`, `pager`, `x-terminal-emulator` and ~200 more, so the tools are all
+    // mounted and none of them resolve. `exists()` skips it on distros that have no such
+    // system (Arch), which is why this never showed up there.
+    for p in ["/etc/ssl", "/etc/ld.so.cache", "/etc/localtime", "/etc/alternatives"] {
         let p = Path::new(p);
         if p.exists() {
             m.push(Mount::ro(p.into()));
