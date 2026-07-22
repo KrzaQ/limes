@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 
 use crate::context::{Context, LABEL};
 use crate::docker;
+use crate::sandbox;
 
 /// `lim docker …` → replace this process with `docker --host <limes> …`.
 pub fn docker(ctx: &Context, args: &[String]) -> Result<()> {
@@ -27,15 +28,23 @@ pub fn compose(ctx: &Context, args: &[String]) -> Result<()> {
 }
 
 /// Open another shell (or command) inside a running sandbox.
+///
+/// The same path a bare `lim` takes when it joins, rather than a second implementation:
+/// two join paths would drift, and this one already lacked the terminal variables. Unlike
+/// the passthroughs above it cannot `exec()` away, because it has to outlive the shell to
+/// decide whether it was the last one out.
 pub fn exec(ctx: &Context, instance: &str, cmd: &[String]) -> Result<()> {
-    let mut c = docker::command(ctx);
-    c.args(["exec", "-it", instance]);
-    if cmd.is_empty() {
-        c.args(["zsh", "-l"]);
-    } else {
-        c.args(cmd);
-    }
-    Err(c.exec().into())
+    let cmd: Vec<String> =
+        if cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { cmd.to_vec() };
+
+    let in_flight = sandbox::in_flight(ctx, instance)?;
+    // No `-w`: `lim exec` names a sandbox, not a workspace, and the host cwd it was invoked
+    // from need not exist inside it.
+    let code = sandbox::join(ctx, instance, None, &cmd, &crate::run::term_env())?;
+
+    drop(in_flight);
+    sandbox::release(ctx, instance)?;
+    std::process::exit(code);
 }
 
 /// Stop named sandboxes, or every running one with `--all`.

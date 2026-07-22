@@ -60,6 +60,21 @@ impl Context {
         self.xdg_runtime_dir.join("limes-group")
     }
 
+    /// Per-sandbox lock, serialising *create-and-initialise* across concurrent `lim`s.
+    ///
+    /// It sits in `$XDG_RUNTIME_DIR` for the same reason the identity files do — per-user
+    /// tmpfs, so a lock can never outlive the login session that made it.
+    pub fn lock_file(&self, name: &str) -> PathBuf {
+        self.xdg_runtime_dir.join(format!("{name}.lock"))
+    }
+
+    /// Held *shared* by every `lim` from before it looks for the sandbox until after its
+    /// shell exits. Teardown takes it exclusively, so "nobody else is in flight" is a
+    /// question the kernel answers rather than something limes has to write down.
+    pub fn shells_file(&self, name: &str) -> PathBuf {
+        self.xdg_runtime_dir.join(format!("{name}.shells"))
+    }
+
     /// Dedicated data-root, so cleanup/prune only ever touches limes's own subtree,
     /// never images or volumes from any other Docker daemon.
     pub fn data_root(&self) -> PathBuf {

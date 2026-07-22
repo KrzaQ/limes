@@ -30,6 +30,11 @@ If you need to contain a hostile process, use a VM, not this.
   `--ro ~/code --rw ~/code/project` makes `~/code` read-only with a writable window.
 - **Ephemeral by construction**: read-only rootfs, a tmpfs `/tmp`, and a tmpfs `$HOME`.
   Nothing persists except your explicit `--rw` mounts, and `~/.claude`.
+- **One sandbox per workspace.** A second `lim` in the same directory *joins* the first
+  rather than building another beside it — two terminals on your host are two shells on one
+  machine, and inside they likewise share `$HOME`, `/tmp` and the process table. The
+  sandbox stops when its last shell leaves. Sibling directories with the same basename
+  (`~/a/test` and `~/b/test`) are different workspaces and get different sandboxes.
 - **Auto-detects agents**: if `claude` / `opencode` / `cursor-agent` are on your host
   `PATH`, their program files are mounted read-only and their auth/state read-write, so they
   run already signed in. Opt out with `--no-agents`, or per agent with `--no-claude` /
@@ -54,15 +59,15 @@ lim                       # zsh in a sandbox of $PWD (read-write)
 lim run -- make test      # run a command instead of a shell
 lim --ro ~/code --rw ~/code/project    # read-only tree with a writable window
 lim --ro ~/.config --hide ~/.config/gh # ...and a subtractive hole: empty inside
-lim --dry-run             # print the docker run it would execute, and stop
+lim --dry-run             # print the docker commands it would execute, and stop
 lim --no-agents           # don't mount claude/opencode/cursor
 lim --no-gpg --no-docker  # turn off individual forwards for one run
 
 lim bootstrap             # one-time: set up the rootless daemon + build the image
 lim doctor                # health check of the installation
 lim build                 # (re)build the image
-lim status                # list running sandboxes
-lim exec <name>           # a second shell into a running sandbox
+lim status                # list running sandboxes, and how many shells are in each
+lim exec <name>           # a shell into a sandbox by name (a bare `lim` joins by workspace)
 lim stop --all            # stop running sandboxes
 lim prune                 # reclaim space (safe: dedicated daemon)
 lim docker ps             # run docker against the limes daemon

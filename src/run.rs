@@ -32,6 +32,8 @@ use crate::context::{IMAGE_TAG, LABEL};
 use crate::docker;
 #[cfg(target_os = "linux")]
 use crate::forward::{self, Forwards};
+#[cfg(target_os = "linux")]
+use crate::sandbox;
 
 /// Assemble the mount table: the shared half of both backends.
 ///
@@ -200,11 +202,11 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
 impl RunSpec {
     /// Render as `docker run` arguments (everything after `docker --host …`).
     ///
-    /// `extra_env` carries the per-shell variables that are deliberately not part of the
-    /// spec — see `term_env`. They land after the spec's own env and before the mounts, so
-    /// they are still container flags rather than part of the command.
-    fn to_run_args(&self, extra_env: &[String]) -> Vec<String> {
-        let mut a: Vec<String> = ["run", "--rm", "-it"].iter().map(|s| s.to_string()).collect();
+    /// Detached, because the container is no longer *a shell* — it is a supervisor that
+    /// shells attach to. `--init` is not decoration: see `sandbox`'s module docs.
+    pub fn to_run_args(&self) -> Vec<String> {
+        let mut a: Vec<String> =
+            ["run", "-d", "--init", "--rm"].iter().map(|s| s.to_string()).collect();
 
         // Identity: run as the human, with a matching HOME.
         //
@@ -229,7 +231,7 @@ impl RunSpec {
         for l in &self.labels {
             push(&mut a, ["--label", l]);
         }
-        for e in self.env.iter().chain(extra_env) {
+        for e in &self.env {
             push(&mut a, ["-e", e]);
         }
         for m in &self.mounts {
@@ -237,22 +239,28 @@ impl RunSpec {
         }
 
         a.push(IMAGE_TAG.into());
-        a.extend(self.entrypoint());
+        // PID 1 is a supervisor that does nothing, so that no shell owns any other's fate.
+        // The busybox is the image's own, at a path host mounts never shadow — the shell
+        // this replaces depended on the `/usr` mirror having arrived.
+        a.extend([sandbox::BUSYBOX, "sleep", "infinity"].iter().map(|s| s.to_string()));
         a
     }
 
-    /// The command the container runs, with the symlink prelude in front when there is one.
-    fn entrypoint(&self) -> Vec<String> {
-        if self.symlinks.is_empty() {
-            return self.cmd.clone();
-        }
-        // docker flattens symlinks on mount, so recreate the host's home symlinks in the
-        // tmpfs home before exec'ing — this is what makes self-locating config (e.g. zsh
-        // plugin paths derived from ~/.zshrc's own resolved location) work in the sandbox.
-        let mut v: Vec<String> =
-            vec!["sh".into(), "-c".into(), symlink_prelude(&self.symlinks), "limes".into()];
-        v.extend(self.cmd.iter().cloned());
-        v
+    /// The one-shot script that makes a freshly created container usable.
+    ///
+    /// Docker flattens symlinks on mount, so the host's home symlinks are recreated in the
+    /// tmpfs `$HOME` — this is what makes self-locating config (zsh plugin paths derived
+    /// from `~/.zshrc`'s own resolved location) work inside.
+    ///
+    /// It runs against the *container*, not a shell, because it mutates state every shell
+    /// shares. The marker guard makes it idempotent, so a joiner can run it unconditionally
+    /// and still repair a sandbox whose creator died before initialising it.
+    pub fn init_script(&self) -> String {
+        format!(
+            "[ -e {m} ] && exit 0; {}: > {m}",
+            symlink_prelude(&self.symlinks),
+            m = sandbox::READY_MARKER
+        )
     }
 }
 
@@ -268,30 +276,47 @@ fn push(out: &mut Vec<String>, pair: [&str; 2]) {
 /// Kept out of `RunSpec` on purpose: these describe the terminal a given *shell* is
 /// attached to, not the sandbox, and a second shell can be attached to a different one.
 #[cfg(target_os = "linux")]
-fn term_env() -> Vec<String> {
+pub fn term_env() -> Vec<String> {
     ["TERM", "COLORTERM"]
         .iter()
         .filter_map(|var| std::env::var(var).ok().map(|v| format!("{var}={v}")))
         .collect()
 }
 
+/// Run, or *join*: a second `lim` in the same workspace attaches to the sandbox already
+/// there rather than building a second one beside it. See `sandbox`'s module docs for why.
 #[cfg(target_os = "linux")]
 pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     let (spec, agent_names) = build_spec(ctx, args)?;
-
-    let mut cmd = docker::command(ctx);
-    cmd.args(spec.to_run_args(&term_env()));
+    let env = term_env();
 
     if args.dry_run {
-        println!("{}", render(&cmd));
+        // Show what would actually happen — a create only when nothing is running, and in
+        // either case the exec that attaches this shell.
+        if !docker::container_running(ctx, &spec.name) {
+            let mut create = docker::command(ctx);
+            create.args(spec.to_run_args());
+            println!("{}", render(&create));
+        }
+        let join = sandbox::join_command(ctx, &spec.name, Some(&spec.workspace), &spec.cmd, &env);
+        println!("{}", render(&join));
         return Ok(());
     }
 
     preflight(ctx)?;
-    if !agent_names.is_empty() {
+
+    // Held across "find or create" *and* the shell itself, so another `lim`'s teardown
+    // cannot stop the sandbox in the window before this shell exists to be counted.
+    let in_flight = sandbox::in_flight(ctx, &spec.name)?;
+    let created = sandbox::ensure_running(ctx, &spec)?;
+    if created && !agent_names.is_empty() {
         eprintln!("limes: agents available: {}", agent_names.join(", "));
     }
-    docker::run(cmd)
+    let code = sandbox::join(ctx, &spec.name, Some(&spec.workspace), &spec.cmd, &env)?;
+
+    drop(in_flight);
+    sandbox::release(ctx, &spec.name)?;
+    std::process::exit(code);
 }
 
 /// The macOS backend: generate an SBPL profile and hand it to `sandbox-exec`.
@@ -529,7 +554,6 @@ fn symlink_prelude(symlinks: &[config::SymlinkSpec]) -> String {
             shell_quote(&sl.link.display().to_string()),
         ));
     }
-    s.push_str("exec \"$@\"");
     s
 }
 

@@ -21,6 +21,8 @@ mod docker;
 #[cfg(target_os = "linux")]
 mod passthrough;
 #[cfg(target_os = "linux")]
+mod sandbox;
+#[cfg(target_os = "linux")]
 mod status;
 
 // The Seatbelt backend. Compiled everywhere on purpose: profile generation is pure string

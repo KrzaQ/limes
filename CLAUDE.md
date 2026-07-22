@@ -162,13 +162,35 @@ context**. The image is near-scratch on purpose: usr-merge symlinks (`/bin`, `/l
 static rescue busybox at `/limes` (a path host mounts never shadow). If you add anything to
 the image, justify why it can't come from the host mirror.
 
-**Container labels drive discovery.** Every sandbox is stamped `limes=1`,
-`limes.workspace=…`, `limes.cmd=…`; `status.rs` and `passthrough.rs` filter on `limes=1`.
-Changing the label schema breaks `status`/`stop`/`prune` together.
+**`sandbox.rs` owns container lifetime**; `run.rs` owns policy. A second `lim` in a
+workspace **joins** the first — PID 1 is a `sleep infinity` supervisor and every shell,
+the first included, is a `docker exec`, so no shell owns another's fate. Three things there
+are load-bearing and each was measured, not assumed:
 
-**`passthrough.rs`** uses `exec()` (process replacement) for `docker`/`compose`/`exec` so the
-tty and exit status pass through cleanly, but `Command::status()` for `stop`/`prune` which
-need to run code afterward.
+- **`--init`.** `sleep` never calls `wait()`, so orphans reparented to it pile up as
+  zombies for the container's lifetime. A shell-as-PID-1 hid this because shells reap.
+- **`ExecIDs` is the teardown signal.** Docker prunes finished execs from it, so it is an
+  exact count of *attached shells* — not processes, which is why no stray background
+  daemon can pin a sandbox open forever. The cost is that backgrounding a build and
+  leaving does not keep the sandbox up.
+- **Two flocks in `$XDG_RUNTIME_DIR`.** `<name>.lock` serialises check→create→initialise,
+  closing both the create race and the readiness race (`docker run -d` returns before the
+  symlink prelude has finished). `<name>.shells` is held *shared* by every `lim` across its
+  whole run and taken *exclusively* by teardown, which covers the gap the daemon cannot
+  see: a `lim` that has found the sandbox but not yet attached, whose shell does not exist
+  to be counted. Retrying instead would be wrong — it would re-run the user's command.
+
+**Discovery is the name, not a label scan.** `derive_name` is a total function of the
+workspace path, so `docker inspect <name>` either hits or it does not. Sandboxes are still
+stamped `limes=1`, `limes.workspace=…`, `limes.cmd=…`, and `status.rs`/`passthrough.rs`
+filter on `limes=1`; changing that schema breaks `status`/`stop`/`prune` together. Note
+`limes.cmd` records only the invocation that *created* the sandbox, so `status` shows a
+shell count rather than presenting it as describing the sandbox.
+
+**`passthrough.rs`** uses `exec()` (process replacement) for `docker`/`compose` so the tty
+and exit status pass through cleanly, but `Command::status()` for `exec`/`stop`/`prune`,
+which need to run code afterward — `exec` because it shares the join-then-maybe-tear-down
+path with `run`, and a replaced process could not do the teardown check.
 
 `doctor.rs` is the empirical answer to "is this host set up correctly" — every rootless
 prerequisite, kernel gate, and service state has a line there. When you add a runtime

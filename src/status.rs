@@ -50,15 +50,18 @@ pub fn status(ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<24} {:<10} {:<28} {}", "NAME", "CMD", "STATUS", "WORKSPACE");
+    // SHELLS replaces the old CMD column. With joining, `limes.cmd` records only the
+    // invocation that *created* the sandbox and says nothing about the shells in it now —
+    // the label is kept (status/stop/prune key off the schema) but it is no longer honest
+    // to present it as describing the sandbox. The shell count is the interesting number.
+    println!("{:<40} {:>6} {:<24} {}", "NAME", "SHELLS", "STATUS", "WORKSPACE");
     for r in &rows {
-        let cmd = r.label(&format!("{LABEL}.cmd"));
         let workspace = r.label(&format!("{LABEL}.workspace"));
         println!(
-            "{:<24} {:<10} {:<28} {}",
-            r.names,
-            truncate(&cmd, 10),
-            truncate(&r.status, 28),
+            "{:<40} {:>6} {:<24} {}",
+            truncate(&r.names, 40),
+            docker::exec_count(ctx, &r.names),
+            truncate(&r.status, 24),
             workspace
         );
     }
