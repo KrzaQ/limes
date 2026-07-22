@@ -93,7 +93,10 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     let detected = agents::detect(ctx, args);
     let mut extra = detected.mounts.clone();
     extra.extend(forward::rosa_mounts(ctx, forwards.rosa));
-    let (mounts, symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
+    let (mounts, mut symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
+    // An agent's launcher symlink is recreated the same way config's `link = "parent"`
+    // entries are — one prelude, one mechanism.
+    symlinks.extend(detected.symlinks);
 
     // ── docker run ──────────────────────────────────────────────────
     let mut cmd = docker::command(ctx);

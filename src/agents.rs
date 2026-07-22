@@ -6,6 +6,7 @@
 //! inside the sandbox. We never mount `~/.local` wholesale — it may hold other creds.
 
 use crate::RunArgs;
+use crate::config::SymlinkSpec;
 use crate::context::Context;
 use crate::mounts::Mount;
 use crate::util::find_in_path;
@@ -17,20 +18,31 @@ struct AgentSpec {
     ro: &'static [&'static str],
     /// State / auth dirs (read-write), relative to `$HOME`.
     rw: &'static [&'static str],
+    /// Symlinks to *recreate* rather than mount, relative to `$HOME`.
+    ///
+    /// Docker flattens a symlink when it mounts it, so a launcher that finds its runtime
+    /// next to its own resolved path (`realpath "$0"`) computes the wrong directory inside.
+    /// Same problem, same fix as config's `link = "parent"` — except here the target tree
+    /// is already covered by `ro`/`rw`, so this only re-points the name at it.
+    links: &'static [&'static str],
 }
 
 const SPECS: &[AgentSpec] = &[
     AgentSpec {
         name: "claude",
         bin: "claude",
+        // `.local/bin/claude` is a symlink too, but it resolves to a single self-contained
+        // binary, so the flattened copy works and is left as a plain mount.
         ro: &[".local/bin/claude", ".local/share/claude"],
         rw: &[".claude", ".claude.json"],
+        links: &[],
     },
     AgentSpec {
         name: "opencode",
         bin: "opencode",
         ro: &[".opencode"],
         rw: &[".local/share/opencode", ".config/opencode"],
+        links: &[],
     },
     // `.config/cursor` holds auth.json. It is a *shared agent credential*, like `~/.claude`
     // — deliberately mounted so the agent runs authenticated inside — not key material the
@@ -40,22 +52,36 @@ const SPECS: &[AgentSpec] = &[
     AgentSpec {
         name: "cursor",
         bin: "cursor-agent",
-        ro: &[".local/bin/cursor-agent", ".local/share/cursor-agent"],
-        rw: &[".config/cursor", ".cursor"],
+        ro: &[],
+        // The version tree is read-write because that is where cursor-agent installs its
+        // own updates, the way opencode writes `.local/share/opencode`. An agent that
+        // corrupts its own install is recoverable; one that cannot update is a papercut
+        // every session.
+        rw: &[".local/share/cursor-agent", ".config/cursor", ".cursor"],
+        // `.local/bin/cursor-agent` → `.local/share/cursor-agent/versions/<v>/cursor-agent`,
+        // a bash launcher that does `SCRIPT_DIR=$(dirname $(realpath $0))` and then execs
+        // `$SCRIPT_DIR/node`. Mounted (and so flattened) it lands in `.local/bin`, where
+        // there is no node, and dies. Recreated, it resolves into the version tree above.
+        links: &[".local/bin/cursor-agent"],
     },
 ];
 
 /// Mounts for every detected, non-opted-out agent, plus their names (for messaging).
 pub struct Detected {
     pub mounts: Vec<Mount>,
+    /// Symlinks the sandbox has to recreate; see `AgentSpec::links`. Linux-only: nothing
+    /// is mounted on macOS, so the host's own symlinks are simply still there.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub symlinks: Vec<SymlinkSpec>,
     pub names: Vec<String>,
 }
 
 pub fn detect(ctx: &Context, args: &RunArgs) -> Detected {
     let mut mounts = Vec::new();
+    let mut symlinks = Vec::new();
     let mut names = Vec::new();
     if args.no_agents {
-        return Detected { mounts, names };
+        return Detected { mounts, symlinks, names };
     }
     for spec in SPECS {
         let opted_out = match spec.name {
@@ -80,6 +106,18 @@ pub fn detect(ctx: &Context, args: &RunArgs) -> Detected {
                 mounts.push(Mount::rw(p));
             }
         }
+        // Resolve on the host, so the sandbox gets the version the host would have run —
+        // not whatever a stale symlink text happens to say. A path that isn't a symlink
+        // (a distro package, a hand-installed binary) is left alone: mounting it is then
+        // the caller's business, and silently doing nothing beats fabricating a link.
+        for rel in spec.links {
+            let link = ctx.home.join(rel);
+            if let Ok(target) = std::fs::canonicalize(&link)
+                && target != link
+            {
+                symlinks.push(SymlinkSpec { link, target });
+            }
+        }
     }
-    Detected { mounts, names }
+    Detected { mounts, symlinks, names }
 }
