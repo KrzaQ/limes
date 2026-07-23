@@ -13,7 +13,8 @@ FROM busybox:musl AS bb
 RUN set -eux; \
     root=/rootfs; \
     mkdir -p \
-        "$root/usr/bin" "$root/usr/lib" "$root/usr/local/bin" \
+        "$root/usr/bin" "$root/usr/sbin" "$root/usr/lib" \
+        "$root/usr/local/bin" "$root/usr/local/sbin" \
         "$root/etc" "$root/home" "$root/root" "$root/run" "$root/tmp" \
         "$root/var" "$root/proc" "$root/sys" "$root/dev" "$root/limes"; \
     cp /bin/busybox "$root/limes/busybox"; \
@@ -35,6 +36,11 @@ RUN set -eux; \
     # /usr/sbin as a symlink to bin, so usr/sbin resolves back to /usr/bin there. Pointing
     # at usr/bin left every /sbin tool missing on Debian, which is how `ldconfig -p` (and
     # so anything locating a lib through it, e.g. idapyswitch) came back empty.
+    #
+    # usr/sbin (and usr/local/sbin) are mkdir'd above so this symlink has a real target in
+    # the image: `docker run --init` places its init binary at /sbin/docker-init, and with
+    # no /usr/sbin directory to resolve into, container creation fails before the host /usr
+    # is ever mounted.
     ln -s usr/bin   "$root/bin"; \
     ln -s usr/sbin  "$root/sbin"; \
     ln -s usr/lib   "$root/lib"; \
