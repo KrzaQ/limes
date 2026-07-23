@@ -59,6 +59,15 @@ struct InspectHostConfig {
     /// bridge shell is never attached to a host-network sandbox or vice versa.
     #[serde(rename = "NetworkMode", default)]
     network_mode: String,
+    /// Passed-through device nodes; compared so a no-GPU shell can't join a GPU sandbox.
+    #[serde(rename = "Devices", default)]
+    devices: Vec<InspectDevice>,
+}
+
+#[derive(Deserialize)]
+struct InspectDevice {
+    #[serde(rename = "PathOnHost")]
+    path_on_host: String,
 }
 
 /// `docker inspect` always returns an array, even for one container.
@@ -110,6 +119,18 @@ pub fn diff(spec: &RunSpec, running: &Inspect) -> Vec<Diff> {
             requested: want_net.into(),
         });
     }
+
+    // Devices are set-compared like mounts: a GPU passed to one and not the other is exactly
+    // the kind of silent difference a join must refuse.
+    let want_dev: BTreeSet<String> = spec.devices.iter().map(|d| format!("--device {d}")).collect();
+    let have_dev: BTreeSet<String> = running
+        .host_config
+        .devices
+        .iter()
+        .map(|d| format!("--device {}", d.path_on_host))
+        .collect();
+    out.extend(have_dev.difference(&want_dev).cloned().map(Diff::OnlyRunning));
+    out.extend(want_dev.difference(&have_dev).cloned().map(Diff::OnlyRequested));
 
     // Rendered as the flags you would type, so the diff is directly actionable rather than
     // a structural dump the reader has to translate.
@@ -202,6 +223,7 @@ mod tests {
             labels: vec![],
             symlinks: vec![],
             host_network: false,
+            devices: vec![],
             cmd: vec!["zsh".into()],
         }
     }
@@ -261,6 +283,18 @@ mod tests {
         assert_eq!(
             diff(&spec(m, "krzaq"), &fixture()),
             vec![Diff::OnlyRequested("--tmpfs /w/.config/gh:mode=0755".into())]
+        );
+    }
+
+    /// A no-GPU shell must not join a GPU sandbox: it would silently get device access it
+    /// never asked for (or, the other way, miss the device it did).
+    #[test]
+    fn a_differing_device_is_reported() {
+        let mut s = spec(matching(), "krzaq");
+        s.devices = vec!["/dev/dri/renderD128".into()]; // fixture has no Devices
+        assert_eq!(
+            diff(&s, &fixture()),
+            vec![Diff::OnlyRequested("--device /dev/dri/renderD128".into())]
         );
     }
 

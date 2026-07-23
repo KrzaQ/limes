@@ -108,6 +108,9 @@ pub struct RunSpec {
     /// Whether the container joins the host network (rootlesskit's namespace). Part of the
     /// spec, so the join-policy diff refuses to attach a bridge shell to a host-net sandbox.
     pub host_network: bool,
+    /// GPU device nodes to pass (`--device`), resolved from the host at build time. Part of
+    /// the spec so the join-policy diff refuses to attach a no-GPU shell to a GPU sandbox.
+    pub devices: Vec<String>,
     pub cmd: Vec<String>,
 }
 
@@ -153,6 +156,18 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         forward::tri(args.host_network, args.no_host_network),
         cfg.as_ref().and_then(|c| c.host_network()),
     );
+
+    // GPU on by default, but that only means "pass what's there": on a machine with no GPU
+    // `gpu_devices` is empty and the default costs nothing. `--no-gpu` forces it empty even
+    // where a GPU exists.
+    let devices = if forward::enabled(
+        forward::tri(args.gpu, args.no_gpu),
+        cfg.as_ref().and_then(|c| c.gpu()),
+    ) {
+        gpu_devices()
+    } else {
+        Vec::new()
+    };
 
     let (table, mut symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
     // An agent's launcher symlink is recreated the same way config's `link = "parent"`
@@ -267,6 +282,7 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         env,
         symlinks,
         host_network,
+        devices,
         cmd: if args.cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { args.cmd.clone() },
     };
     Ok((spec, detected.names))
@@ -300,6 +316,12 @@ impl RunSpec {
         // (verified on the rootless daemon), so hostname mirroring is unaffected.
         if self.host_network {
             push(&mut a, ["--network", "host"]);
+        }
+        // GPU device nodes. Verified to work under the full posture below (cap-drop ALL,
+        // read-only, no-new-privileges) -- passing a device grants access to it, not a
+        // capability, so nothing here has to be relaxed.
+        for dev in &self.devices {
+            push(&mut a, ["--device", dev]);
         }
 
         // Security posture: no new privileges, drop all caps, read-only rootfs, seccomp
@@ -348,6 +370,40 @@ impl RunSpec {
 #[cfg(target_os = "linux")]
 fn push(out: &mut Vec<String>, pair: [&str; 2]) {
     out.extend(pair.iter().map(|s| s.to_string()));
+}
+
+/// The GPU device nodes to pass into the sandbox, empty when the host has no GPU (which is
+/// what makes the on-by-default safe -- nothing to pass, nothing happens).
+///
+/// DRM *render* nodes (`/dev/dri/renderD*`) are the unprivileged GPU interface and all a
+/// sandbox needs -- enough for EGL/GBM, which is what an Xvfb or any GL workload trips over
+/// when the host's nvidia userland is present but no device is. `card*` nodes are left out
+/// on purpose: they carry modesetting/display control the sandbox has no business with.
+/// `/dev/nvidia*` (the compute/control nodes) come along when present, for CUDA and
+/// `nvidia-smi`; the `nvidia-caps` directory and anything not a character device is skipped.
+#[cfg(target_os = "linux")]
+fn gpu_devices() -> Vec<String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let is_char = |p: &std::path::Path| {
+        std::fs::metadata(p).map(|m| m.file_type().is_char_device()).unwrap_or(false)
+    };
+    let named = |dir: &str, keep: &dyn Fn(&str) -> bool| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| is_char(p) && p.file_name().and_then(|n| n.to_str()).is_some_and(keep))
+            .map(|p| p.display().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    let mut devs = named("/dev/dri", &|n| n.starts_with("renderD"));
+    devs.extend(named("/dev", &|n| n.starts_with("nvidia")));
+    devs
 }
 
 /// The terminal is host state, so mirror it. `-t` otherwise makes Docker invent

@@ -256,6 +256,20 @@ ports land, so tools inside can reach a `-p 5432` database that the default brid
 `--no-host-network` (or `host_network = false`) puts a single run back on the bridge, where
 sibling containers are reachable by IP but published ports are not.
 
+**GPU:** the sandbox passes the GPU through by default — the DRM render nodes
+(`/dev/dri/renderD*`) plus `/dev/nvidia*` when present. This is on because it is a no-op on
+a machine with no GPU (nothing to pass), and because without it a GL/EGL workload on an
+nvidia host *crashes*: the host's nvidia userland is in the mounted `/usr`, but with no
+device present `libnvidia-egl-gbm` faults instead of falling back, taking Xvfb and anything
+GL-adjacent down with it. With the render node passed, EGL initializes on the real GPU and
+it works. It composes with the security posture (cap-drop ALL, read-only, no-new-privileges)
+— a device grants access to itself, not a capability. The privileged `card*`/modeset nodes
+are deliberately left out; render nodes are the unprivileged compute interface and enough.
+`--no-gpu` (or `gpu = false`) passes nothing, for a run that wants no device access or to
+keep a hybrid laptop's dGPU asleep. Access still needs the host user to be able to open the
+node (the `render`/`video` group, or an ACL) — limes passes the device, it can't grant you
+permission to it.
+
 **Drop-ins:** alongside `config.toml`, limes also reads `~/.config/limes/config.d/*.toml`
 (merged, `config.toml` winning on collisions). `config.toml` is yours to hand-write;
 `config.d/` is for whole files owned by tools or installers — e.g. a dotfiles repo can ship

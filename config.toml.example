@@ -91,6 +91,14 @@
 # the default bridge instead -- sibling containers reachable by IP, published ports not.
 # host_network = false
 
+# The GPU is passed through by default: DRM render nodes (/dev/dri/renderD*) plus /dev/nvidia*
+# when present. On by default because it is a no-op with no GPU, and because without it a
+# GL/EGL workload on an nvidia host crashes (the driver userland is present via /usr but the
+# device is not). Set false to pass nothing -- no device access, and a hybrid laptop's dGPU
+# stays asleep. (Access still needs you to be able to open the node: render/video group or an
+# ACL. limes passes the device; it can't grant permission.)
+# gpu = false
+
 # The sandbox gets its own *system* gitconfig setting `core.checkStat = minimal`, because
 # inside you are container uid 0 while the index on disk records your real uid — and git's
 # default stat check compares owners, so without it every `git status` re-hashes the work

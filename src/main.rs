@@ -220,6 +220,17 @@ pub struct RunArgs {
     #[arg(long = "no-host-network", overrides_with = "host_network")]
     pub no_host_network: bool,
 
+    // Pass the GPU in: DRM render nodes (/dev/dri/renderD*) plus /dev/nvidia* when present.
+    // On by default *when a GPU is present* -- it is a no-op on a machine with none, so the
+    // default costs nothing there. Card/modeset nodes are deliberately excluded; render
+    // nodes are the unprivileged compute interface and are all a sandbox needs.
+    /// Pass the GPU (DRM render nodes + /dev/nvidia*) into the sandbox (default when present)
+    #[arg(long = "gpu", overrides_with = "no_gpu")]
+    pub gpu: bool,
+    /// Do not pass any GPU device into the sandbox
+    #[arg(long = "no-gpu", overrides_with = "gpu")]
+    pub no_gpu: bool,
+
     // Named for git's *system* config tier, not for `~/.gitconfig` — which is mounted
     // read-only either way, and which overrides this. Resolves like the forwards above.
     /// Give the sandbox a system gitconfig setting core.checkStat=minimal (default)

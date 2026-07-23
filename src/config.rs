@@ -61,6 +61,10 @@ pub struct Config {
     /// `None` means the built-in default, which is on — see `RunSpec::host_network`.
     #[serde(default)]
     host_network: Option<bool>,
+    /// Pass the GPU (DRM render nodes + `/dev/nvidia*`) into the sandbox. `None` means the
+    /// built-in default: on when a GPU is present, a no-op when none is — see `gpu_devices`.
+    #[serde(default)]
+    gpu: Option<bool>,
     /// Host toolchains to mirror in, keyed by name (`rbenv`, `rust`, `uv`), each with a mode.
     /// Empty unless a config asks: nothing is mounted by surprise. Merged across drop-ins
     /// like `[mounts]`, so a later file can restate a toolchain at a different mode.
@@ -288,6 +292,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
     let mut data_root: Option<String> = None;
     let mut system_gitconfig: Option<bool> = None;
     let mut host_network: Option<bool> = None;
+    let mut gpu: Option<bool> = None;
     let mut toolchains: HashMap<String, ToolchainSpec> = HashMap::new();
     let mut found = false;
 
@@ -305,6 +310,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
             data_root = cfg.data_root.or(data_root);
             system_gitconfig = cfg.system_gitconfig.or(system_gitconfig);
             host_network = cfg.host_network.or(host_network);
+            gpu = cfg.gpu.or(gpu);
             toolchains.extend(cfg.toolchains);
             found = true;
         }
@@ -316,6 +322,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         data_root = cfg.data_root.or(data_root);
         system_gitconfig = cfg.system_gitconfig.or(system_gitconfig);
         host_network = cfg.host_network.or(host_network);
+        gpu = cfg.gpu.or(gpu);
         toolchains.extend(cfg.toolchains);
         found = true;
     }
@@ -327,6 +334,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         data_root,
         system_gitconfig,
         host_network,
+        gpu,
         toolchains,
     }))
 }
@@ -370,6 +378,12 @@ impl Config {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn host_network(&self) -> Option<bool> {
         self.host_network
+    }
+
+    /// The standing GPU switch, for the CLI flag pair to override.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn gpu(&self) -> Option<bool> {
+        self.gpu
     }
 
     /// The configured data-root, expanded. Absolute is required: the path is written into
