@@ -219,15 +219,17 @@ data_root = "/var/lib/limes/you/docker"   # absolute; any path you own on ext4/x
 reports the filesystem — without either, the symptom is an `EINVAL` deep inside a buildkit
 cache mount on your first image build, which names neither the data-root nor the reason.
 
-**Toolchains:** rbenv, uv and the like keep their state under `$HOME`, which the sandbox
-shadows with a tmpfs — so inside, `ruby` is the system copy, not your rbenv-selected version,
-and `uv` is simply absent. The `[toolchains]` section mirrors a named toolchain's tree in at
-the host's paths, so the host's selection carries through (limes mirrors paths identically,
-which is what lets rbenv's shims and uv's managed pythons resolve exactly as they do outside):
+**Toolchains:** rbenv, rustup, uv and the like keep their state under `$HOME`, which the
+sandbox shadows with a tmpfs — so inside, `ruby` is the system copy, not your rbenv-selected
+version, and `cargo` and `uv` are simply absent. The `[toolchains]` section mirrors a named
+toolchain's tree in at the host's paths, so the host's selection carries through (limes
+mirrors paths identically, which is what lets rbenv's shims, cargo's absolute paths and uv's
+managed pythons resolve exactly as they do outside):
 
 ```toml
 [toolchains]
 uv    = "ro"                          # pythons + tools visible; not mutable from inside
+rust  = "ro"                          # host rustup toolchains + cargo, registry cache shared
 rbenv = { mode = "rw", optional = true }   # installs inside reach the host; skip if absent
 ```
 
@@ -238,7 +240,14 @@ cache is a footgun (`uv` can't install even into a writable in-tree venv), not p
 host — is the intended endgame but not yet built; it parses and is refused for now. A
 toolchain named but not installed is a hard error unless marked `optional = true`, so "why is
 ruby the system one inside?" fails loudly at the config rather than silently. Recipes ship for
-`rbenv` and `uv`; naming any other is an error until its recipe is added.
+`rbenv`, `rust` and `uv`; naming any other is an error until its recipe is added.
+
+`rust` brings in `~/.rustup` and `~/.cargo/bin` (so `rustup show` inside reports the same
+toolchain as outside), the cargo config and the `cargo install` ledger, and — always
+read-write, per the rule above — the `~/.cargo/registry` and `~/.cargo/git` caches, without
+which no build inside can so much as extract a crate. It mounts those paths individually
+rather than the cargo home as a whole, because `~/.cargo/credentials.toml` is your crates.io
+API token and credentials reach a sandbox as oracles or not at all.
 
 **Host network:** the sandbox is a container on limes' rootless daemon, and by default it
 joins the host network — which in rootless mode is rootlesskit's namespace, *not* the real

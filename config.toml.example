@@ -69,18 +69,21 @@
 # the passphrase is cached, anything in the sandbox can sign as you without being asked.
 # gpg_unrestricted = true
 
-# Host toolchains to mirror in. rbenv/uv keep their versions under $HOME, which the sandbox
-# shadows with a tmpfs -- so without this, `ruby` inside is the system copy (not your
-# rbenv-selected one) and `uv` is missing entirely. Nothing is mounted unless named here.
+# Host toolchains to mirror in. rbenv/rustup/uv keep their versions under $HOME, which the
+# sandbox shadows with a tmpfs -- so without this, `ruby` inside is the system copy (not your
+# rbenv-selected one) and `cargo`/`uv` are missing entirely. Nothing is mounted unless named
+# here.
 #
 # mode "ro" = run the installed versions but can't add/remove them; "rw" = also install into
 # the host tree from inside. Caches are always rw (a ro cache can't be populated, so it's
-# useless). "overlay" (ephemeral writable upper, host untouched) is planned, not yet built.
+# useless) -- for `rust` that means ~/.cargo/registry, without which nothing builds inside.
+# "overlay" (ephemeral writable upper, host untouched) is planned, not yet built.
 #
 # A named-but-absent toolchain is a hard error -- mark it optional to skip on machines that
-# don't have it. Recipes exist for `rbenv` and `uv`.
+# don't have it. Recipes exist for `rbenv`, `rust` and `uv`.
 # [toolchains]
 # uv    = "ro"
+# rust  = "ro"
 # rbenv = { mode = "ro", optional = true }
 
 # The sandbox joins the host network by default (rootlesskit's namespace in rootless mode,

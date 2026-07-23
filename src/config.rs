@@ -61,7 +61,7 @@ pub struct Config {
     /// `None` means the built-in default, which is on — see `RunSpec::host_network`.
     #[serde(default)]
     host_network: Option<bool>,
-    /// Host toolchains to mirror in, keyed by name (`rbenv`, `uv`), each with a mode.
+    /// Host toolchains to mirror in, keyed by name (`rbenv`, `rust`, `uv`), each with a mode.
     /// Empty unless a config asks: nothing is mounted by surprise. Merged across drop-ins
     /// like `[mounts]`, so a later file can restate a toolchain at a different mode.
     #[serde(default)]
@@ -112,6 +112,10 @@ impl ToolchainSpec {
 /// absence is what `optional` guards; the rest are mounted only if they happen to exist,
 /// since caches and managed-version dirs are created on first use.
 struct Recipe {
+    /// The name a config names it by; the table below is keyed on this rather than a
+    /// separate map key, so the "known toolchains" an error offers cannot drift from the
+    /// ones that actually resolve.
+    name: &'static str,
     primary: &'static str,
     /// Mounted at the toolchain's chosen mode.
     install: &'static [&'static str],
@@ -121,18 +125,60 @@ struct Recipe {
     cache: &'static [&'static str],
 }
 
-/// The recipes limes ships. Adding a toolchain is a line here plus a mention in the docs;
-/// the recipe is layout knowledge (where rbenv/uv live), never a policy about enabling them.
-fn recipe(name: &str) -> Option<Recipe> {
-    match name {
-        "rbenv" => Some(Recipe { primary: "~/.rbenv", install: &["~/.rbenv"], cache: &[] }),
-        "uv" => Some(Recipe {
-            primary: "~/.local/bin/uv",
-            install: &["~/.local/bin/uv", "~/.local/share/uv"],
-            cache: &["~/.cache/uv"],
-        }),
-        _ => None,
-    }
+/// The recipes limes ships. Adding a toolchain is an entry here plus a mention in the docs;
+/// the recipe is layout knowledge (where rbenv/rust/uv live), never a policy about enabling
+/// them — nothing mounts unless a config names it.
+const RECIPES: &[Recipe] = &[
+    Recipe { name: "rbenv", primary: "~/.rbenv", install: &["~/.rbenv"], cache: &[] },
+    // Presence keys off `~/.cargo`, not `~/.rustup`: a distro-packaged rust arrives through
+    // the mirrored `/usr` and leaves only the caches under `$HOME`, and that host is still
+    // one worth mirroring. `~/.rustup` is in `install`, so it comes along when it exists and
+    // is skipped when it doesn't.
+    //
+    // Subpaths rather than `~/.cargo` itself, deliberately: the cargo home holds
+    // `credentials.toml` — the crates.io API token, key material, which never enters a
+    // sandbox — and `hide` cannot carve it back out, being directories-only. What the lists
+    // leave out is simply absent inside; `~/.cargo` is then a directory Docker invents on
+    // the tmpfs `$HOME`, and its being writable is what lets cargo take its `.package-cache`
+    // lock, which then vanishes with the sandbox, as it should.
+    Recipe {
+        name: "rust",
+        primary: "~/.cargo",
+        // The toolchains themselves, the shims and `cargo install`ed binaries, the config
+        // that decides how a build behaves, and rustup's PATH snippet (which a shell rc file
+        // may source, and whose absence is then an error at every login).
+        //
+        // The last two are the `cargo install` ledger, and they sit here rather than in
+        // `cache` on purpose: under `rw` an install from inside would otherwise leave a
+        // binary in the host's `~/.cargo/bin` that the host's own `cargo install --list`
+        // never learns about — a half-applied write, which is worse than either extreme.
+        install: &[
+            "~/.rustup",
+            "~/.cargo/bin",
+            "~/.cargo/config.toml",
+            "~/.cargo/env",
+            "~/.cargo/.crates.toml",
+            "~/.cargo/.crates2.json",
+        ],
+        // Cargo cannot build anything against a read-only registry — it extracts sources
+        // into it — so this is the same "a ro cache is breakage, not protection" as uv's.
+        cache: &["~/.cargo/registry", "~/.cargo/git"],
+    },
+    Recipe {
+        name: "uv",
+        primary: "~/.local/bin/uv",
+        install: &["~/.local/bin/uv", "~/.local/share/uv"],
+        cache: &["~/.cache/uv"],
+    },
+];
+
+fn recipe(name: &str) -> Option<&'static Recipe> {
+    RECIPES.iter().find(|r| r.name == name)
+}
+
+/// The known names, for the error a misspelled toolchain gets.
+fn known_toolchains() -> String {
+    RECIPES.iter().map(|r| r.name).collect::<Vec<_>>().join(", ")
 }
 
 /// Standing on/off switches for the credential and socket forwards.
@@ -420,7 +466,7 @@ impl Config {
 
         for (name, spec) in &self.toolchains {
             let Some(r) = recipe(name) else {
-                bail!("unknown toolchain `{name}` (known: rbenv, uv)");
+                bail!("unknown toolchain `{name}` (known: {})", known_toolchains());
             };
             let mode = match spec.mode() {
                 ToolchainMode::Ro => Mode::Ro,
@@ -530,6 +576,36 @@ mod tests {
         let c = parse_str("[toolchains]\nnope = \"ro\"\n");
         let err = c.resolve().map(|_| ()).expect_err("unknown toolchain must fail");
         assert!(err.to_string().contains("unknown toolchain"), "got: {err}");
+    }
+
+    /// The "known:" list is derived from `RECIPES`, so a recipe added without a matching
+    /// error-message edit still names itself. Asserted on `rust`, the newest entry.
+    #[test]
+    fn unknown_toolchain_message_lists_rust() {
+        let c = parse_str("[toolchains]\nnope = \"ro\"\n");
+        let err = c.resolve().map(|_| ()).expect_err("unknown toolchain must fail");
+        assert!(err.to_string().contains("rust"), "got: {err}");
+    }
+
+    /// `~/.cargo` holds `credentials.toml` — the crates.io API token — which is why the rust
+    /// recipe enumerates subpaths instead of mounting the cargo home. Collapsing it to the
+    /// one obvious mount would carry the token into every sandbox and nothing else would
+    /// notice, so pin it here.
+    #[test]
+    fn rust_recipe_never_carries_the_crates_io_token() {
+        let r = recipe("rust").expect("rust recipe must exist");
+        for p in r.install.iter().chain(r.cache) {
+            assert_ne!(*p, "~/.cargo", "mounting the cargo home brings credentials.toml in");
+            assert!(!p.contains("credentials"), "{p} is key material");
+        }
+    }
+
+    /// Resolving an optional toolchain must not depend on what the test machine has
+    /// installed — present, it mounts; absent, it skips. Either way, `Ok`.
+    #[test]
+    fn optional_rust_resolves_either_way() {
+        let c = parse_str("[toolchains]\nrust = { mode = \"ro\", optional = true }\n");
+        assert!(c.resolve().is_ok(), "optional toolchain must resolve on any host");
     }
 
     #[test]
