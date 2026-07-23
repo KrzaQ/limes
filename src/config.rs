@@ -57,6 +57,78 @@ pub struct Config {
     /// `Option` for the same reason `Forward`'s fields are — field-by-field drop-in merge.
     #[serde(default)]
     system_gitconfig: Option<bool>,
+    /// Host toolchains to mirror in, keyed by name (`rbenv`, `uv`), each with a mode.
+    /// Empty unless a config asks: nothing is mounted by surprise. Merged across drop-ins
+    /// like `[mounts]`, so a later file can restate a toolchain at a different mode.
+    #[serde(default)]
+    toolchains: HashMap<String, ToolchainSpec>,
+}
+
+/// A toolchain's `"ro"` shorthand or `{ mode = "ro", optional = true }` long form —
+/// deliberately the same shape as `MountSpec`, since it is the same idea for a named tree.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ToolchainSpec {
+    Short(ToolchainMode),
+    Long {
+        mode: ToolchainMode,
+        /// Skip silently when the toolchain isn't installed, instead of failing. Off by
+        /// default: a toolchain named in config is one you expect to be there, and a silent
+        /// skip is how "why is ruby the system one inside?" becomes a debugging session.
+        #[serde(default)]
+        optional: bool,
+    },
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum ToolchainMode {
+    /// Installed versions/tools visible and runnable, but not mutable from inside.
+    Ro,
+    /// Also installable from inside — `gem install`, `uv tool install` reach the host tree.
+    Rw,
+    /// ro base with an ephemeral writable upper: install inside without touching the host.
+    /// Parses today but is refused at resolve time until overlay mounts exist.
+    Overlay,
+}
+
+impl ToolchainSpec {
+    fn mode(&self) -> ToolchainMode {
+        match self {
+            ToolchainSpec::Short(m) => *m,
+            ToolchainSpec::Long { mode, .. } => *mode,
+        }
+    }
+    fn optional(&self) -> bool {
+        matches!(self, ToolchainSpec::Long { optional: true, .. })
+    }
+}
+
+/// What a known toolchain occupies on disk. `primary` is the presence indicator — its
+/// absence is what `optional` guards; the rest are mounted only if they happen to exist,
+/// since caches and managed-version dirs are created on first use.
+struct Recipe {
+    primary: &'static str,
+    /// Mounted at the toolchain's chosen mode.
+    install: &'static [&'static str],
+    /// Always mounted read-write: a read-only cache is a footgun (uv can't install even
+    /// into a writable in-tree venv), not protection, and the versions dir is the thing the
+    /// mode is actually guarding.
+    cache: &'static [&'static str],
+}
+
+/// The recipes limes ships. Adding a toolchain is a line here plus a mention in the docs;
+/// the recipe is layout knowledge (where rbenv/uv live), never a policy about enabling them.
+fn recipe(name: &str) -> Option<Recipe> {
+    match name {
+        "rbenv" => Some(Recipe { primary: "~/.rbenv", install: &["~/.rbenv"], cache: &[] }),
+        "uv" => Some(Recipe {
+            primary: "~/.local/bin/uv",
+            install: &["~/.local/bin/uv", "~/.local/share/uv"],
+            cache: &["~/.cache/uv"],
+        }),
+        _ => None,
+    }
 }
 
 /// Standing on/off switches for the credential and socket forwards.
@@ -165,6 +237,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
     let mut hostname_suffix: Option<String> = None;
     let mut data_root: Option<String> = None;
     let mut system_gitconfig: Option<bool> = None;
+    let mut toolchains: HashMap<String, ToolchainSpec> = HashMap::new();
     let mut found = false;
 
     if let Ok(entries) = std::fs::read_dir(ctx.config_d_dir()) {
@@ -180,6 +253,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
             hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
             data_root = cfg.data_root.or(data_root);
             system_gitconfig = cfg.system_gitconfig.or(system_gitconfig);
+            toolchains.extend(cfg.toolchains);
             found = true;
         }
     }
@@ -189,6 +263,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         hostname_suffix = cfg.hostname_suffix.or(hostname_suffix);
         data_root = cfg.data_root.or(data_root);
         system_gitconfig = cfg.system_gitconfig.or(system_gitconfig);
+        toolchains.extend(cfg.toolchains);
         found = true;
     }
 
@@ -198,6 +273,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         hostname_suffix,
         data_root,
         system_gitconfig,
+        toolchains,
     }))
 }
 
@@ -312,7 +388,68 @@ impl Config {
                 }
             }
         }
+
+        self.resolve_toolchains(&mut mounts)?;
         Ok(Resolved { mounts, symlinks })
+    }
+
+    /// Append the mounts for every enabled toolchain. Same tier as `[mounts]`, so it rides
+    /// the same dedupe/sort and an explicit `--ro`/`--rw` still wins.
+    fn resolve_toolchains(&self, mounts: &mut Vec<Mount>) -> Result<()> {
+        let expand = |raw: &str| -> Result<PathBuf> {
+            Ok(PathBuf::from(
+                shellexpand::full(raw)
+                    .with_context(|| format!("expanding toolchain path `{raw}`"))?
+                    .into_owned(),
+            ))
+        };
+
+        for (name, spec) in &self.toolchains {
+            let Some(r) = recipe(name) else {
+                bail!("unknown toolchain `{name}` (known: rbenv, uv)");
+            };
+            let mode = match spec.mode() {
+                ToolchainMode::Ro => Mode::Ro,
+                ToolchainMode::Rw => Mode::Rw,
+                ToolchainMode::Overlay => bail!(
+                    "toolchain `{name}`: mode \"overlay\" is not implemented yet — use \
+                     \"ro\" or \"rw\""
+                ),
+            };
+
+            // Presence is the primary path. Absent + optional is a silent skip; absent and
+            // not optional is the loud failure the user asked for -- a toolchain named in
+            // config is one you meant to have, and quietly falling back to the system copy
+            // is the confusing outcome.
+            let primary = expand(r.primary)?;
+            if !primary.exists() {
+                if spec.optional() {
+                    continue;
+                }
+                bail!(
+                    "toolchain `{name}` is enabled but not installed ({} is missing) — \
+                     mark it `{{ mode = \"{}\", optional = true }}` to skip when absent",
+                    primary.display(),
+                    if mode == Mode::Rw { "rw" } else { "ro" }
+                );
+            }
+
+            // Everything present is mounted; a missing cache/version dir is skipped, not an
+            // error -- those are created on first use, so a fresh install lacks them.
+            for raw in r.install {
+                let path = expand(raw)?;
+                if path.exists() {
+                    mounts.push(mount(mode, mounts::canonicalize(&path)?));
+                }
+            }
+            for raw in r.cache {
+                let path = expand(raw)?;
+                if path.exists() {
+                    mounts.push(Mount::rw(mounts::canonicalize(&path)?));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -372,6 +509,39 @@ mod tests {
         let c = parse_str("[mounts]\n\"/a\" = { mode = \"hide\", link = \"parent\" }\n");
         let err = c.resolve().map(|_| ()).expect_err("hide + link must not resolve");
         assert!(err.to_string().contains("cannot combine"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_toolchain_is_rejected() {
+        let c = parse_str("[toolchains]\nnope = \"ro\"\n");
+        let err = c.resolve().map(|_| ()).expect_err("unknown toolchain must fail");
+        assert!(err.to_string().contains("unknown toolchain"), "got: {err}");
+    }
+
+    #[test]
+    fn overlay_mode_is_refused_for_now() {
+        let c = parse_str("[toolchains]\nuv = { mode = \"overlay\" }\n");
+        let err = c.resolve().map(|_| ()).expect_err("overlay must fail until implemented");
+        assert!(err.to_string().contains("overlay"), "got: {err}");
+    }
+
+    /// Presence keys off the primary path. A toolchain named non-optional whose primary is
+    /// absent must fail loudly rather than silently leaving the sandbox on the system copy.
+    #[test]
+    fn non_optional_missing_toolchain_fails_loud() {
+        // `~` expands to $HOME; point it somewhere with no toolchains so the primary path
+        // cannot exist, without depending on the test machine's real home.
+        let prev = std::env::var_os("HOME");
+        // SAFETY: single-threaded test; restored below.
+        unsafe { std::env::set_var("HOME", "/nonexistent-limes-test-home") };
+        let c = parse_str("[toolchains]\nrbenv = \"ro\"\n");
+        let res = c.resolve().map(|_| ());
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let err = res.expect_err("missing non-optional toolchain must fail");
+        assert!(err.to_string().contains("not installed"), "got: {err}");
     }
 
     /// The drop-in merge: `config.toml` is applied last and wins, but only on the keys it

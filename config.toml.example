@@ -69,6 +69,21 @@
 # the passphrase is cached, anything in the sandbox can sign as you without being asked.
 # gpg_unrestricted = true
 
+# Host toolchains to mirror in. rbenv/uv keep their versions under $HOME, which the sandbox
+# shadows with a tmpfs -- so without this, `ruby` inside is the system copy (not your
+# rbenv-selected one) and `uv` is missing entirely. Nothing is mounted unless named here.
+#
+# mode "ro" = run the installed versions but can't add/remove them; "rw" = also install into
+# the host tree from inside. Caches are always rw (a ro cache can't be populated, so it's
+# useless). "overlay" (ephemeral writable upper, host untouched) is planned, not yet built.
+#
+# A named-but-absent toolchain is a hard error -- mark it optional to skip on machines that
+# don't have it. Recipes exist for `rbenv` and `uv`.
+# [toolchains]
+# uv    = "ro"
+# rbenv = { mode = "ro", optional = true }
+
+
 # The sandbox gets its own *system* gitconfig setting `core.checkStat = minimal`, because
 # inside you are container uid 0 while the index on disk records your real uid — and git's
 # default stat check compares owners, so without it every `git status` re-hashes the work

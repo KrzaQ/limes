@@ -219,6 +219,27 @@ data_root = "/var/lib/limes/you/docker"   # absolute; any path you own on ext4/x
 reports the filesystem — without either, the symptom is an `EINVAL` deep inside a buildkit
 cache mount on your first image build, which names neither the data-root nor the reason.
 
+**Toolchains:** rbenv, uv and the like keep their state under `$HOME`, which the sandbox
+shadows with a tmpfs — so inside, `ruby` is the system copy, not your rbenv-selected version,
+and `uv` is simply absent. The `[toolchains]` section mirrors a named toolchain's tree in at
+the host's paths, so the host's selection carries through (limes mirrors paths identically,
+which is what lets rbenv's shims and uv's managed pythons resolve exactly as they do outside):
+
+```toml
+[toolchains]
+uv    = "ro"                          # pythons + tools visible; not mutable from inside
+rbenv = { mode = "rw", optional = true }   # installs inside reach the host; skip if absent
+```
+
+Modes: `ro` (run the installed versions, can't add/remove them), `rw` (also `gem install` /
+`uv tool install` into the host tree). Caches are always read-write regardless — a read-only
+cache is a footgun (`uv` can't install even into a writable in-tree venv), not protection.
+`overlay` — ro base with an ephemeral writable upper, so installs inside touch nothing on the
+host — is the intended endgame but not yet built; it parses and is refused for now. A
+toolchain named but not installed is a hard error unless marked `optional = true`, so "why is
+ruby the system one inside?" fails loudly at the config rather than silently. Recipes ship for
+`rbenv` and `uv`; naming any other is an error until its recipe is added.
+
 **Drop-ins:** alongside `config.toml`, limes also reads `~/.config/limes/config.d/*.toml`
 (merged, `config.toml` winning on collisions). `config.toml` is yours to hand-write;
 `config.d/` is for whole files owned by tools or installers — e.g. a dotfiles repo can ship
