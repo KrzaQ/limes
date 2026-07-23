@@ -111,6 +111,11 @@ pub struct RunSpec {
     /// GPU device nodes to pass (`--device`), resolved from the host at build time. Part of
     /// the spec so the join-policy diff refuses to attach a no-GPU shell to a GPU sandbox.
     pub devices: Vec<String>,
+    /// Whether to launch the in-sandbox Docker API proxy from the init prelude. Tracks the
+    /// docker forward: on means tools inside get a labeled socket whose containers are reaped
+    /// on teardown. Not compared by the policy diff itself — but the `/run/limes` tmpfs and
+    /// hidden socket mounts it rides with are, which is what keeps a join honest.
+    pub docker_proxy: bool,
     pub cmd: Vec<String>,
 }
 
@@ -211,6 +216,13 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     // socket in it, and 0700 because that is what the spec promises anything writing here.
     // It is scaffolding: the forwarded sockets mount on top of it, so it has to come first.
     mounts.push(MountArg::Tmpfs(Tmpfs::new(&ctx.xdg_runtime_dir, "mode=0700")));
+    // A writable home for the docker proxy's listen socket: the rootfs is read-only, so the
+    // proxy (see `docker_proxy`) has nowhere to `bind()` without this. Only when the docker
+    // forward is on, so a `--no-docker` sandbox carries neither the tmpfs nor the proxy — and
+    // the policy diff then correctly refuses to cross the two.
+    if forwards.docker {
+        mounts.push(MountArg::Tmpfs(Tmpfs::new(Path::new(forward::PROXY_LISTEN_DIR), "mode=0700")));
+    }
     // Everything above is scaffolding that exists before any host path is mirrored, which
     // is what makes it the right place to splice the invented directories into below.
     let scaffolding = mounts.len();
@@ -283,6 +295,7 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         symlinks,
         host_network,
         devices,
+        docker_proxy: forwards.docker,
         cmd: if args.cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { args.cmd.clone() },
     };
     Ok((spec, detected.names))
@@ -359,12 +372,32 @@ impl RunSpec {
     /// shares. The marker guard makes it idempotent, so a joiner can run it unconditionally
     /// and still repair a sandbox whose creator died before initialising it.
     pub fn init_script(&self) -> String {
+        let proxy = if self.docker_proxy { proxy_launch(&self.name) } else { String::new() };
         format!(
-            "[ -e {m} ] && exit 0; {}: > {m}",
+            "[ -e {m} ] && exit 0; {proxy}{}: > {m}",
             symlink_prelude(&self.symlinks),
             m = sandbox::READY_MARKER
         )
     }
+}
+
+/// The launch line for the in-sandbox Docker API proxy, backgrounded and stdio-detached.
+///
+/// Detached (`>/dev/null 2>&1 &`) so it outlives the one-shot init exec — reparented to tini
+/// (PID 1's `--init`), which reaps it — while `sleep infinity` stays PID 1 and no shell owns
+/// it. A proxy crash then breaks docker for the sandbox but never takes a shell or its work
+/// down. Prepended inside `init_script`'s readiness-marker guard, so it starts exactly once.
+///
+/// The flags here must match the `__docker-proxy` subcommand in `main.rs`; a test pins that.
+#[cfg(target_os = "linux")]
+fn proxy_launch(name: &str) -> String {
+    format!(
+        "{lim} __docker-proxy --upstream {up} --listen {listen} --owner {owner} >/dev/null 2>&1 & ",
+        lim = forward::LIM_BIN,
+        up = forward::PROXY_UPSTREAM,
+        listen = forward::PROXY_LISTEN,
+        owner = shell_quote(name),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -791,6 +824,20 @@ mod tests {
         let mut m = vec![Mount::hide("/a".into(), 0o755), Mount::hide("/a".into(), 0o700)];
         dedupe(&mut m);
         assert_eq!(m, vec![Mount::hide("/a".into(), 0o700)]);
+    }
+
+    /// The proxy launch must name the exact flags `__docker-proxy` declares in `main.rs`, and
+    /// be a detached background job — a typo here would only surface as a dead `DOCKER_HOST`
+    /// inside a real sandbox.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proxy_launch_matches_the_hidden_subcommand() {
+        let s = proxy_launch("limes-proj");
+        assert!(s.contains("/limes/lim __docker-proxy"), "{s}");
+        assert!(s.contains("--upstream /limes/docker.sock"), "{s}");
+        assert!(s.contains("--listen /run/limes/docker.sock"), "{s}");
+        assert!(s.contains("--owner limes-proj"), "{s}");
+        assert!(s.trim_end().ends_with('&'), "must be backgrounded: {s}");
     }
 
     #[cfg(target_os = "linux")]

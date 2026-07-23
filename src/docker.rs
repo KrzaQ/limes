@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 
-use crate::context::Context;
+use crate::context::{Context, LABEL};
 
 /// A `docker --host unix://…limes-docker.sock` command, ready for more args.
 pub fn command(ctx: &Context) -> Command {
@@ -116,6 +116,37 @@ pub fn remove_quietly(ctx: &Context, name: &str) {
 pub fn stop_quietly(ctx: &Context, name: &str) {
     let _ = command(ctx)
         .args(["stop", "-t", "1", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Remove every container `name`'s sandbox created — those the in-sandbox proxy stamped with
+/// `limes.owner=<name>` — so a sandbox's containers die with it. Includes stopped ones (`-a`),
+/// which a fixture may have left behind.
+///
+/// Tolerant and quiet by design: it runs on the teardown path, where a container that is
+/// already gone or a momentary daemon hiccup must never turn into an error the user sees on
+/// their way out of a shell.
+pub fn reap_owned(ctx: &Context, name: &str) {
+    let out = command(ctx)
+        .args(["ps", "-aq", "--filter", &format!("label={LABEL}.owner={name}")])
+        .stderr(std::process::Stdio::null())
+        .output();
+    let ids: Vec<String> = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => return,
+    };
+    if ids.is_empty() {
+        return;
+    }
+    let _ = command(ctx)
+        .args(["rm", "-f"])
+        .args(&ids)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();

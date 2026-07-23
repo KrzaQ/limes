@@ -260,6 +260,12 @@ pub fn release(ctx: &Context, name: &str) -> Result<()> {
     };
     if docker::exec_count(ctx, name) == 0 {
         docker::stop_quietly(ctx, name);
+        // The last shell is out and the sandbox is stopping, so the containers it created have
+        // no parent left — reap them by the `limes.owner` label the proxy stamped on. Under
+        // the same create lock, so a concurrent joiner that just registered cannot have its
+        // fresh containers reaped out from under it (it would hold the shared shells lock,
+        // failing the `try_exclusive` above before we reach here).
+        docker::reap_owned(ctx, name);
     }
     Ok(())
 }

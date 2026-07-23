@@ -224,6 +224,7 @@ mod tests {
             symlinks: vec![],
             host_network: false,
             devices: vec![],
+            docker_proxy: false,
             cmd: vec!["zsh".into()],
         }
     }

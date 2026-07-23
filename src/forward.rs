@@ -227,12 +227,37 @@ fn add_rosa_env(p: &mut Pieces, ctx: &Context) {
     }
 }
 
-/// Mount the limes daemon's own socket into the container as the normal docker
-/// socket, so tools inside drive the same daemon (docker-outside-of-docker). Nothing
-/// is nested: fixtures the sandbox starts are siblings on the limes daemon, not dind.
+/// Container-side paths for the in-sandbox Docker API proxy (see `docker_proxy`). Defined here
+/// rather than in that Linux-only module because `run.rs` and this file both need them and both
+/// compile on macOS too.
+///
+/// The real daemon socket is mounted at `PROXY_UPSTREAM`, hidden from tools; the proxy listens
+/// at `PROXY_LISTEN` (under `PROXY_LISTEN_DIR`, a tmpfs, because the rootfs is read-only and a
+/// listen socket needs a writable directory to `bind()` in), and `DOCKER_HOST` points there;
+/// the `lim` binary is mounted at `LIM_BIN` so the container can run the proxy subcommand.
+pub const PROXY_UPSTREAM: &str = "/limes/docker.sock";
+pub const PROXY_LISTEN_DIR: &str = "/run/limes";
+pub const PROXY_LISTEN: &str = "/run/limes/docker.sock";
+pub const LIM_BIN: &str = "/limes/lim";
+
+/// Mount the limes daemon's socket into the container — but behind a label-injecting proxy, so
+/// every container tools inside create is stamped `limes.owner=<sandbox>` and dies with the
+/// sandbox. Nothing is nested: those containers are siblings on the limes daemon, not dind.
+///
+/// The proxy is the sandbox's own `lim`, mounted in and launched from the init prelude (see
+/// `run.rs`); this only lays down the mounts and points `DOCKER_HOST` at it. The `/run/limes`
+/// tmpfs the proxy listens under is emitted by `run.rs`, since it is not a same-path bind.
 fn add_docker_socket(p: &mut Pieces, ctx: &Context) {
-    p.binds.push(Bind::new(ctx.socket().display().to_string(), "/var/run/docker.sock", false));
-    p.env.push("DOCKER_HOST=unix:///var/run/docker.sock".into());
+    // The real daemon socket, at a hidden path only the proxy talks to.
+    p.binds.push(Bind::new(ctx.socket().display().to_string(), PROXY_UPSTREAM, false));
+    // The `lim` binary itself: it lives in ~/.cargo/bin on the host, which the tmpfs $HOME
+    // shadows, so it must be mounted explicitly. It runs against the mirrored /usr like any
+    // other host binary. If we somehow can't find our own path, tools inside will fail loudly
+    // against a dead DOCKER_HOST rather than silently bypass the labeling.
+    if let Ok(exe) = std::env::current_exe() {
+        p.binds.push(Bind::new(exe.display().to_string(), LIM_BIN, true));
+    }
+    p.env.push(format!("DOCKER_HOST=unix://{PROXY_LISTEN}"));
 }
 
 #[cfg(test)]

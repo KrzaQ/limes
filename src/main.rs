@@ -18,6 +18,9 @@ mod util;
 mod bootstrap;
 #[cfg(target_os = "linux")]
 mod docker;
+// The label-injecting Docker API proxy, run inside the sandbox as a hidden subcommand.
+#[cfg(target_os = "linux")]
+mod docker_proxy;
 #[cfg(target_os = "linux")]
 mod passthrough;
 #[cfg(target_os = "linux")]
@@ -111,6 +114,21 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
+    /// Internal: the in-sandbox Docker API proxy that stamps `limes.owner` onto containers a
+    /// sandbox creates, so teardown can reap them. Not for direct use — `lim run` launches it
+    /// inside the container (see `docker_proxy`).
+    #[command(name = "__docker-proxy", hide = true)]
+    DockerProxy {
+        /// The real limes daemon socket to forward to (mounted in at a hidden path).
+        #[arg(long)]
+        upstream: PathBuf,
+        /// The socket to listen on, which the sandbox's `DOCKER_HOST` points at.
+        #[arg(long)]
+        listen: PathBuf,
+        /// The owning sandbox name, written as the `limes.owner` label value.
+        #[arg(long)]
+        owner: String,
+    },
 }
 
 impl Commands {
@@ -128,6 +146,7 @@ impl Commands {
             Commands::Stop { .. } => "stop",
             Commands::Prune { .. } => "prune",
             Commands::Build { .. } => "build",
+            Commands::DockerProxy { .. } => "__docker-proxy",
         }
     }
 }
@@ -276,6 +295,10 @@ fn main() -> Result<()> {
         Some(Commands::Prune { force }) => passthrough::prune(&ctx, force),
         #[cfg(target_os = "linux")]
         Some(Commands::Build { no_cache }) => bootstrap::build(&ctx, no_cache),
+        #[cfg(target_os = "linux")]
+        Some(Commands::DockerProxy { upstream, listen, owner }) => {
+            docker_proxy::serve(&listen, &upstream, &owner)
+        }
 
         // The CLI surface stays identical across platforms so `--help` and the docs don't
         // fork, but these subcommands manage Docker objects and a rootless daemon, neither

@@ -152,6 +152,14 @@ over config in *both* directions, so a standing `gpg = false` is still escapable
 `--gpg` for a single run. `docker = false` drops the socket *and* `DOCKER_HOST`, so nothing
 inside is left pointing at a socket that isn't there.
 
+The docker socket is forwarded behind a small proxy — the sandbox's own `lim`, run inside it
+— that stamps `limes.owner=<sandbox>` onto every container created through it, whatever the
+client (CLI, compose, an SDK, testcontainers). When the sandbox's last shell leaves, those
+containers are torn down with it, so a fixture a test spun up can't outlive the sandbox that
+started it. `lim ps` shows each sandbox's live child count, and flags any container on the
+daemon with no live parent so a leak from a crashed sandbox stays visible rather than
+silently accumulating.
+
 `gpg_unrestricted` (`--gpg-unrestricted`) is the one switch here that defaults *off*. The
 extra socket asks pinentry to confirm every use of a key, and that confirmation is what
 makes handing a sandbox your signing key reasonable. But gpg-agent will not trust a
