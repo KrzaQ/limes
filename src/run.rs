@@ -486,7 +486,21 @@ fn default_mounts(ctx: &Context) -> Vec<Mount> {
     // as are `editor`, `pager`, `x-terminal-emulator` and ~200 more, so the tools are all
     // mounted and none of them resolve. `exists()` skips it on distros that have no such
     // system (Arch), which is why this never showed up there.
-    for p in ["/etc/ssl", "/etc/ld.so.cache", "/etc/localtime", "/etc/alternatives"] {
+    //
+    // `/etc/ca-certificates` is the same shape of trap on Arch: `/etc/ssl` is mounted, but
+    // the bundle every TLS client opens through it — `/etc/ssl/certs/ca-certificates.crt` —
+    // is a symlink to `/etc/ca-certificates/extracted/tls-ca-bundle.pem`, so without this
+    // the mount is a directory of dangling links and *nothing* inside can verify a
+    // certificate: `curl` fails with "error adding trust anchors", `cargo fetch` with an
+    // SSL peer-certificate error naming neither /etc nor the missing file. Debian keeps a
+    // real file at that path and has no such directory, so `exists()` skips it there.
+    for p in [
+        "/etc/ssl",
+        "/etc/ca-certificates",
+        "/etc/ld.so.cache",
+        "/etc/localtime",
+        "/etc/alternatives",
+    ] {
         let p = Path::new(p);
         if p.exists() {
             m.push(Mount::ro(p.into()));
