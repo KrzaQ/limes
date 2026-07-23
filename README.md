@@ -240,6 +240,13 @@ toolchain named but not installed is a hard error unless marked `optional = true
 ruby the system one inside?" fails loudly at the config rather than silently. Recipes ship for
 `rbenv` and `uv`; naming any other is an error until its recipe is added.
 
+**Host network:** the sandbox is a container on limes' rootless daemon, and by default it
+joins the host network — which in rootless mode is rootlesskit's namespace, *not* the real
+host's, so it does not expose the machine's own services. That is where docker-published
+ports land, so tools inside can reach a `-p 5432` database that the default bridge cannot.
+`--no-host-network` (or `host_network = false`) puts a single run back on the bridge, where
+sibling containers are reachable by IP but published ports are not.
+
 **Drop-ins:** alongside `config.toml`, limes also reads `~/.config/limes/config.d/*.toml`
 (merged, `config.toml` winning on collisions). `config.toml` is yours to hand-write;
 `config.d/` is for whole files owned by tools or installers — e.g. a dotfiles repo can ship

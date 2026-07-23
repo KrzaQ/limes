@@ -105,6 +105,9 @@ pub struct RunSpec {
     pub env: Vec<String>,
     pub labels: Vec<String>,
     pub symlinks: Vec<config::SymlinkSpec>,
+    /// Whether the container joins the host network (rootlesskit's namespace). Part of the
+    /// spec, so the join-policy diff refuses to attach a bridge shell to a host-net sandbox.
+    pub host_network: bool,
     pub cmd: Vec<String>,
 }
 
@@ -145,6 +148,11 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
             .with_context(|| format!("writing {}", ctx.gitconfig_file().display()))?;
         extra.push(Mount::ro(ctx.gitconfig_file()));
     }
+
+    let host_network = forward::enabled(
+        forward::tri(args.host_network, args.no_host_network),
+        cfg.as_ref().and_then(|c| c.host_network()),
+    );
 
     let (table, mut symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
     // An agent's launcher symlink is recreated the same way config's `link = "parent"`
@@ -258,6 +266,7 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         mounts,
         env,
         symlinks,
+        host_network,
         cmd: if args.cmd.is_empty() { vec!["zsh".into(), "-l".into()] } else { args.cmd.clone() },
     };
     Ok((spec, detected.names))
@@ -285,6 +294,13 @@ impl RunSpec {
         push(&mut a, ["-u", "0:0"]);
         push(&mut a, ["-w", &path_str(&self.workspace)]);
         push(&mut a, ["--hostname", &self.hostname]);
+        // Rootless `--network host` is rootlesskit's namespace, not the real host's, so it
+        // does not expose the machine's own services -- but it is where published ports
+        // land, which the default bridge cannot reach. `--hostname` still applies over it
+        // (verified on the rootless daemon), so hostname mirroring is unaffected.
+        if self.host_network {
+            push(&mut a, ["--network", "host"]);
+        }
 
         // Security posture: no new privileges, drop all caps, read-only rootfs, seccomp
         // left enabled. Never --privileged — the sandbox bounds reach, it doesn't grant it.

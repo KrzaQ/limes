@@ -55,6 +55,10 @@ struct InspectHostConfig {
     /// Absent rather than empty when a container has no tmpfs at all.
     #[serde(rename = "Tmpfs")]
     tmpfs: Option<std::collections::HashMap<String, String>>,
+    /// `"host"` for host networking, otherwise a bridge/network name. Compared so a
+    /// bridge shell is never attached to a host-network sandbox or vice versa.
+    #[serde(rename = "NetworkMode", default)]
+    network_mode: String,
 }
 
 /// `docker inspect` always returns an array, even for one container.
@@ -91,6 +95,19 @@ pub fn diff(spec: &RunSpec, running: &Inspect) -> Vec<Diff> {
             what: "hostname".into(),
             running: running.config.hostname.clone(),
             requested: spec.hostname.clone(),
+        });
+    }
+
+    let want_net = if spec.host_network { "host" } else { "bridge" };
+    // Docker reports the bridge case as "default", "bridge" or a network name; only "host"
+    // is the one that matters to distinguish, so compare against that rather than guessing
+    // the exact bridge spelling.
+    let running_host_net = running.host_config.network_mode == "host";
+    if spec.host_network != running_host_net {
+        out.push(Diff::Differs {
+            what: "network".into(),
+            running: running.host_config.network_mode.clone(),
+            requested: want_net.into(),
         });
     }
 
@@ -184,6 +201,7 @@ mod tests {
             env: vec!["IGNORED=1".into()],
             labels: vec![],
             symlinks: vec![],
+            host_network: false,
             cmd: vec!["zsh".into()],
         }
     }
@@ -243,6 +261,22 @@ mod tests {
         assert_eq!(
             diff(&spec(m, "krzaq"), &fixture()),
             vec![Diff::OnlyRequested("--tmpfs /w/.config/gh:mode=0755".into())]
+        );
+    }
+
+    /// A bridge shell must not attach to a host-network sandbox: joining would put the
+    /// shell on a different network than the mounts were reasoned about on.
+    #[test]
+    fn a_differing_network_is_reported() {
+        let mut s = spec(matching(), "krzaq");
+        s.host_network = true; // fixture's HostConfig has no NetworkMode -> bridge
+        assert_eq!(
+            diff(&s, &fixture()),
+            vec![Diff::Differs {
+                what: "network".into(),
+                running: "".into(),
+                requested: "host".into(),
+            }]
         );
     }
 

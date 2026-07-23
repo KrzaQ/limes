@@ -83,6 +83,10 @@
 # uv    = "ro"
 # rbenv = { mode = "ro", optional = true }
 
+# The sandbox joins the host network by default (rootlesskit's namespace in rootless mode,
+# not the real host), so docker-published ports are reachable from inside. Set false to use
+# the default bridge instead -- sibling containers reachable by IP, published ports not.
+# host_network = false
 
 # The sandbox gets its own *system* gitconfig setting `core.checkStat = minimal`, because
 # inside you are container uid 0 while the index on disk records your real uid — and git's

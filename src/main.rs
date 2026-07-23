@@ -209,6 +209,17 @@ pub struct RunArgs {
     #[arg(long = "no-docker", overrides_with = "docker")]
     pub no_docker: bool,
 
+    // The sandbox is a container on limes' rootless daemon; on the default bridge it can
+    // reach sibling containers by IP but not host-published ports. `--network host` (the
+    // rootlesskit namespace, not the real host) reaches both. Default on; pair lets a run
+    // opt back into bridge isolation. Resolves like the forwards above.
+    /// Give the sandbox the host network, so host-published ports are reachable (default)
+    #[arg(long = "host-network", overrides_with = "no_host_network")]
+    pub host_network: bool,
+    /// Put the sandbox on the default bridge instead of the host network
+    #[arg(long = "no-host-network", overrides_with = "host_network")]
+    pub no_host_network: bool,
+
     // Named for git's *system* config tier, not for `~/.gitconfig` — which is mounted
     // read-only either way, and which overrides this. Resolves like the forwards above.
     /// Give the sandbox a system gitconfig setting core.checkStat=minimal (default)
