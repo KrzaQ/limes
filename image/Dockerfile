@@ -28,8 +28,15 @@ RUN set -eux; \
     # Debian with no interpreter at the path every one of its binaries requests --
     # which surfaces as `exec /usr/bin/zsh: no such file or directory`, an ENOENT
     # about the interpreter that reads as if the binary itself were missing.
+    # /sbin points at usr/sbin, not usr/bin, for the same reason /lib64 points at
+    # usr/lib64: the families disagree and only usr/sbin is right on both. Debian keeps
+    # admin tools in a real /usr/sbin (and ships an ldconfig wrapper that `exec`s the
+    # hardcoded /sbin/ldconfig.real -- broken if /sbin lands in /usr/bin); Arch has
+    # /usr/sbin as a symlink to bin, so usr/sbin resolves back to /usr/bin there. Pointing
+    # at usr/bin left every /sbin tool missing on Debian, which is how `ldconfig -p` (and
+    # so anything locating a lib through it, e.g. idapyswitch) came back empty.
     ln -s usr/bin   "$root/bin"; \
-    ln -s usr/bin   "$root/sbin"; \
+    ln -s usr/sbin  "$root/sbin"; \
     ln -s usr/lib   "$root/lib"; \
     ln -s usr/lib64 "$root/lib64"; \
     ln -s /run    "$root/var/run"; \
@@ -37,6 +44,9 @@ RUN set -eux; \
 
 FROM scratch
 COPY --from=bb /rootfs/ /
-# /limes holds the rescue shell; host /usr/bin wins for everything else.
-ENV PATH=/usr/local/bin:/usr/bin:/bin:/limes
+# /limes holds the rescue shell; host /usr/bin wins for everything else. The sbin dirs are
+# on PATH because the sandbox runs as (mapped) uid 0, for whom admin tools like `ldconfig`
+# are expected on PATH -- without them a bare `ldconfig` is simply not found, which is a
+# different failure from the /sbin symlink above and had to be fixed alongside it.
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/limes
 CMD ["/limes/busybox", "sh"]
