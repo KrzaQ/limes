@@ -1,4 +1,7 @@
-//! `lim status` / `lim ps` — list running limes sandboxes.
+//! `lim status` / `lim ps` — list running limes sandboxes, their child containers, and any
+//! orphans on the daemon.
+
+use std::collections::HashSet;
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
@@ -12,18 +15,28 @@ struct PsRow {
     names: String,
     #[serde(rename = "Status")]
     status: String,
+    /// `"running"`, `"exited"`, `"created"`, … — distinguishes a live sandbox (whose children
+    /// have a parent) from a stopped one.
+    #[serde(rename = "State", default)]
+    state: String,
     /// Comma-separated `k=v` list, e.g. `limes=1,limes.workspace=/home/…`.
     #[serde(rename = "Labels")]
     labels: String,
 }
 
 impl PsRow {
-    fn label(&self, key: &str) -> String {
-        self.labels
-            .split(',')
-            .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
-            .unwrap_or("")
-            .to_string()
+    fn label(&self, key: &str) -> &str {
+        self.labels.split(',').find_map(|kv| kv.strip_prefix(&format!("{key}="))).unwrap_or("")
+    }
+
+    /// Whether this container is a limes *sandbox* (as opposed to one a sandbox created).
+    fn is_sandbox(&self) -> bool {
+        self.label(LABEL) == "1"
+    }
+
+    /// The sandbox that created this container, or `""` if it carries no owner label.
+    fn owner(&self) -> &str {
+        self.label(&format!("{LABEL}.owner"))
     }
 }
 
@@ -32,39 +45,52 @@ pub fn status(ctx: &Context) -> Result<()> {
         bail!("limes daemon not reachable at {} — run `lim bootstrap`", ctx.socket().display());
     }
 
-    let out = docker::command(ctx)
-        .args(["ps", "--filter", &format!("label={LABEL}=1"), "--format", "{{json .}}"])
-        .output()?;
+    // One sweep of *every* container on the dedicated daemon — sandboxes, their children, and
+    // anything orphaned — so counts and orphan detection agree and cost a single docker call.
+    let out = docker::command(ctx).args(["ps", "-a", "--format", "{{json .}}"]).output()?;
     if !out.status.success() {
         bail!("`docker ps` failed on the limes daemon");
     }
-
     let rows: Vec<PsRow> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(serde_json::from_str)
         .collect::<Result<_, _>>()?;
 
-    if rows.is_empty() {
+    // Running sandboxes are the listing; their names are also what tells an owned child from an
+    // orphan below.
+    let sandboxes: Vec<&PsRow> =
+        rows.iter().filter(|r| r.is_sandbox() && r.state == "running").collect();
+    let running: HashSet<&str> = sandboxes.iter().map(|r| r.names.as_str()).collect();
+
+    if sandboxes.is_empty() {
         println!("no running limes sandboxes");
-        return Ok(());
+    } else {
+        // SHELLS is the live `docker exec` count; CHILDREN is the containers this sandbox
+        // created (see `docker_proxy`), stopped ones included since they'll be reaped too.
+        println!("{:<36} {:>6} {:>8} {:<20} WORKSPACE", "NAME", "SHELLS", "CHILDREN", "STATUS");
+        for r in &sandboxes {
+            let children = rows.iter().filter(|c| c.owner() == r.names).count();
+            println!(
+                "{:<36} {:>6} {:>8} {:<20} {}",
+                truncate(&r.names, 36),
+                docker::exec_count(ctx, &r.names),
+                children,
+                truncate(&r.status, 20),
+                r.label(&format!("{LABEL}.workspace")),
+            );
+        }
     }
 
-    // SHELLS replaces the old CMD column. With joining, `limes.cmd` records only the
-    // invocation that *created* the sandbox and says nothing about the shells in it now —
-    // the label is kept (status/stop/prune key off the schema) but it is no longer honest
-    // to present it as describing the sandbox. The shell count is the interesting number.
-    println!("{:<40} {:>6} {:<24} WORKSPACE", "NAME", "SHELLS", "STATUS");
-    for r in &rows {
-        let workspace = r.label(&format!("{LABEL}.workspace"));
-        println!(
-            "{:<40} {:>6} {:<24} {}",
-            truncate(&r.names, 40),
-            docker::exec_count(ctx, &r.names),
-            truncate(&r.status, 24),
-            workspace
-        );
+    // Orphans: not a sandbox, and no *running* sandbox owns it — a child whose parent exited
+    // (the leak this whole feature fixes), or a container started outside the ownership model.
+    // Surfaced, not reaped: reaping on demand is a follow-up on `prune`.
+    let orphans = rows.iter().filter(|r| !r.is_sandbox() && !running.contains(r.owner())).count();
+    if orphans > 0 {
+        let plural = if orphans == 1 { "" } else { "s" };
+        println!("\n{orphans} orphaned container{plural} (no live parent) — see `lim docker ps`");
     }
+
     Ok(())
 }
 
