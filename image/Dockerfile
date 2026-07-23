@@ -29,20 +29,20 @@ RUN set -eux; \
     # Debian with no interpreter at the path every one of its binaries requests --
     # which surfaces as `exec /usr/bin/zsh: no such file or directory`, an ENOENT
     # about the interpreter that reads as if the binary itself were missing.
-    # /sbin points at usr/sbin, not usr/bin, for the same reason /lib64 points at
-    # usr/lib64: the families disagree and only usr/sbin is right on both. Debian keeps
-    # admin tools in a real /usr/sbin (and ships an ldconfig wrapper that `exec`s the
-    # hardcoded /sbin/ldconfig.real -- broken if /sbin lands in /usr/bin); Arch has
-    # /usr/sbin as a symlink to bin, so usr/sbin resolves back to /usr/bin there. Pointing
-    # at usr/bin left every /sbin tool missing on Debian, which is how `ldconfig -p` (and
-    # so anything locating a lib through it, e.g. idapyswitch) came back empty.
-    #
-    # usr/sbin (and usr/local/sbin) are mkdir'd above so this symlink has a real target in
-    # the image: `docker run --init` places its init binary at /sbin/docker-init, and with
-    # no /usr/sbin directory to resolve into, container creation fails before the host /usr
-    # is ever mounted.
+    # /sbin points at usr/bin, not usr/sbin, and this is load-bearing for `--init`.
+    # `docker run --init` bind-mounts the host's docker-init onto /sbin/docker-init, and
+    # since the host /usr is mounted read-only, that only lands if the path resolves to a
+    # file that already exists on the host. The host's docker-init lives at
+    # /usr/bin/docker-init, so /sbin must resolve there -- usr/bin does (directly, and on
+    # Arch via /usr/sbin -> bin), usr/sbin does not on Debian, where it is a real directory
+    # without docker-init. Point /sbin at usr/sbin and no sandbox starts at all:
+    #   stat /sbin/docker-init: no such file or directory
+    # The cost falls on Debian's ldconfig, which is a wrapper that `exec`s the hardcoded
+    # /sbin/ldconfig.real -- now /usr/bin/ldconfig.real, which does not exist. Most sbin
+    # tools are real binaries and work fine once /usr/sbin is on PATH (below); ldconfig is
+    # the exception, and bending /sbin to fix it would break --init, so it is left alone.
     ln -s usr/bin   "$root/bin"; \
-    ln -s usr/sbin  "$root/sbin"; \
+    ln -s usr/bin   "$root/sbin"; \
     ln -s usr/lib   "$root/lib"; \
     ln -s usr/lib64 "$root/lib64"; \
     ln -s /run    "$root/var/run"; \
