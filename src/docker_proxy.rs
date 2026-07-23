@@ -269,13 +269,74 @@ fn relay_response(
     if req_was_head || status == 204 || status == 304 || (100..200).contains(&status) {
         return Ok(true);
     }
-    match resp.content_length() {
-        Some(len) => {
-            copy_n(up, client, len)?;
-            Ok(true)
+    if let Some(len) = resp.content_length() {
+        copy_n(up, client, len)?;
+        return Ok(true);
+    }
+    if resp.is_chunked() {
+        // A *finite* chunked response (an image pull, `/containers/json`) has a terminator, so
+        // docker reuses the connection for the next request right after it — most notably the
+        // real create that follows a pull. Forward it to that terminator and keep the loop, or
+        // that create sails past unlabeled. An endless chunked stream simply never terminates
+        // and never returns, which is correct: its client won't pipeline behind it.
+        stream_chunked(up, client)?;
+        return Ok(true);
+    }
+    // Close-delimited (no length, not chunked: `logs -f`, a raw attach): the connection *is*
+    // the framing, so it can't be reused — hand off to a splice and end it.
+    Ok(false)
+}
+
+/// Forward a chunked body verbatim, up→client, until the terminating zero-size chunk and any
+/// trailers. Only the chunk-size lines are parsed (to find the end); the bytes are passed
+/// through untouched, so the client still sees valid chunked framing.
+fn stream_chunked(up: &mut UnixStream, client: &mut UnixStream) -> Result<()> {
+    loop {
+        let line = read_line(up)?;
+        if line.is_empty() {
+            return Ok(()); // upstream closed mid-stream — nothing more to relay
         }
-        // Chunked or close-delimited: a stream with no length to wait on — the caller splices.
-        None => Ok(false),
+        client.write_all(&line)?;
+        let hex = std::str::from_utf8(&line).unwrap_or("");
+        let hex = hex.split(';').next().unwrap_or("").trim(); // drop any chunk extensions
+        let size = usize::from_str_radix(hex, 16).unwrap_or(0);
+        if size == 0 {
+            // Trailer headers (usually none) up to the terminating blank line.
+            loop {
+                let t = read_line(up)?;
+                if t.is_empty() || t == b"\r\n" || t == b"\n" {
+                    if !t.is_empty() {
+                        client.write_all(&t)?;
+                    }
+                    return Ok(());
+                }
+                client.write_all(&t)?;
+            }
+        }
+        copy_n(up, client, size + 2)?; // chunk data plus its trailing CRLF
+    }
+}
+
+/// Read one line including its terminating `\n` (empty vec on EOF). For chunk-size lines, which
+/// are short — the bulk chunk data goes through `copy_n`, not this.
+fn read_line(s: &mut UnixStream) -> Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(32);
+    let mut byte = [0u8; 1];
+    loop {
+        match s.read(&mut byte) {
+            Ok(0) => return Ok(buf),
+            Ok(_) => {
+                buf.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Ok(buf);
+                }
+                if buf.len() > 64 * 1024 {
+                    anyhow::bail!("chunk-size line exceeded 64 KiB");
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e).context("reading chunk-size line"),
+        }
     }
 }
 
@@ -523,6 +584,65 @@ mod tests {
         up.write_all(rb).unwrap();
         drop(up);
 
+        h.join().unwrap();
+    }
+
+    /// The pull regression: `docker run` of an absent image sends the create, then a pull
+    /// (finite chunked response), then the *real* create — all on one keep-alive connection.
+    /// The proxy has to consume the chunked pull to its terminator and still label the create
+    /// after it; treating chunked as "stream, then splice" let that create through unlabeled.
+    #[test]
+    fn create_after_chunked_response_is_labeled() {
+        let (client_a, client_b) = UnixStream::pair().unwrap();
+        let (up_a, up_b) = UnixStream::pair().unwrap();
+        for s in [&client_a, &client_b, &up_a, &up_b] {
+            guard(s);
+        }
+
+        let h = thread::spawn(move || {
+            let _ = handle(client_b, up_a, "limes.owner", "o");
+        });
+
+        // A pull (chunked response), then the create, on one connection.
+        let mut client = client_a;
+        client
+            .write_all(
+                b"POST /v1.52/images/create?fromImage=busybox HTTP/1.1\r\n\
+                  Host: d\r\nContent-Length: 0\r\n\r\n",
+            )
+            .unwrap();
+        let body = br#"{"Image":"busybox"}"#;
+        client
+            .write_all(
+                format!(
+                    "POST /v1.52/containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        client.write_all(body).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut up = up_b;
+        let pull = read_head(&mut up).unwrap().unwrap();
+        assert!(pull.starts_with(b"POST /v1.52/images/create"), "{pull:?}");
+        // A finite chunked body: one 7-byte chunk, then the terminator.
+        up.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+        up.write_all(b"7\r\n{\"x\":1}\r\n").unwrap();
+        up.write_all(b"0\r\n\r\n").unwrap();
+
+        // The create that follows must still carry the label.
+        let ch = read_head(&mut up).unwrap().unwrap();
+        let cr = parse_head(&ch);
+        assert!(cr.is_create(), "second request is the create: {:?}", String::from_utf8_lossy(&ch));
+        let mut cb = vec![0u8; cr.content_length().unwrap()];
+        up.read_exact(&mut cb).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&cb).unwrap();
+        assert_eq!(v["Labels"]["limes.owner"], "o");
+
+        up.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+        drop(up);
         h.join().unwrap();
     }
 
