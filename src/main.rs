@@ -54,8 +54,12 @@ use clap::{Args, Parser, Subcommand};
 
 use context::Context;
 
+/// Crate version plus the git commit it was built from (see `build.rs`), so `lim --version`
+/// pins the exact build — the one a sandbox mounts in as `/limes/lim`.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LIMES_GIT"), ")");
+
 #[derive(Parser)]
-#[command(name = "lim", version, about = "A host-mirroring sandbox for agents and dev commands")]
+#[command(name = "lim", version = VERSION, about = "A host-mirroring sandbox for agents and dev commands")]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Default action (bare `lim`) is `run` — these flags apply to it.
