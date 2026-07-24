@@ -75,9 +75,13 @@ pub struct Config {
 
 /// A toolchain's `"ro"` shorthand or `{ mode = "ro", optional = true }` long form —
 /// deliberately the same shape as `MountSpec`, since it is the same idea for a named tree.
+///
+/// `pub(crate)` so `local.rs` can hold one: a project file offers the same two tables as
+/// the global config, and reusing the spec types is what keeps the two from drifting into
+/// subtly different dialects.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum ToolchainSpec {
+pub(crate) enum ToolchainSpec {
     Short(ToolchainMode),
     Long {
         mode: ToolchainMode,
@@ -91,7 +95,7 @@ enum ToolchainSpec {
 
 #[derive(Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
-enum ToolchainMode {
+pub(crate) enum ToolchainMode {
     /// Installed versions/tools visible and runnable, but not mutable from inside.
     Ro,
     /// Also installable from inside — `gem install`, `uv tool install` reach the host tree.
@@ -101,8 +105,19 @@ enum ToolchainMode {
     Overlay,
 }
 
+impl ToolchainMode {
+    /// How the mode was spelled in TOML, for the diff a changed project file prints.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ToolchainMode::Ro => "ro",
+            ToolchainMode::Rw => "rw",
+            ToolchainMode::Overlay => "overlay",
+        }
+    }
+}
+
 impl ToolchainSpec {
-    fn mode(&self) -> ToolchainMode {
+    pub(crate) fn mode(&self) -> ToolchainMode {
         match self {
             ToolchainSpec::Short(m) => *m,
             ToolchainSpec::Long { mode, .. } => *mode,
@@ -231,9 +246,11 @@ impl Forward {
 
 /// `"ro"` shorthand or the `{ mode = "ro", … }` long form. The bare-string form stays
 /// valid forever; the table carries optional per-path behaviour.
+///
+/// `pub(crate)` for the same reason `ToolchainSpec` is — see there.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum MountSpec {
+pub(crate) enum MountSpec {
     Short(Mode),
     Long {
         mode: Mode,
@@ -250,7 +267,7 @@ enum MountSpec {
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
-enum Mode {
+pub(crate) enum Mode {
     Ro,
     Rw,
     /// Shadow the path with an empty dir. Subtractive: the point is to punch a hole in a
@@ -258,14 +275,25 @@ enum Mode {
     Hide,
 }
 
+impl Mode {
+    /// How the mode was spelled in TOML, for the diff a changed project file prints.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Mode::Ro => "ro",
+            Mode::Rw => "rw",
+            Mode::Hide => "hide",
+        }
+    }
+}
+
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
-enum Link {
+pub(crate) enum Link {
     Parent,
 }
 
 impl MountSpec {
-    fn mode(&self) -> Mode {
+    pub(crate) fn mode(&self) -> Mode {
         match self {
             MountSpec::Short(m) => *m,
             MountSpec::Long { mode, .. } => *mode,
@@ -418,131 +446,167 @@ impl Config {
     /// Turn config entries into mounts (+ symlinks to recreate). Missing paths hard-fail
     /// unless `optional`, matching CLI `--ro`/`--rw`.
     pub fn resolve(&self) -> Result<Resolved> {
-        let mut mounts = Vec::new();
-        let mut symlinks = Vec::new();
-
-        for (raw, spec) in &self.mounts {
-            let expanded = shellexpand::full(raw)
-                .with_context(|| format!("expanding config mount path `{raw}`"))?;
-            let path = PathBuf::from(expanded.as_ref());
-            let mode = spec.mode();
-
-            // `hide` has no host source to bind, so it resolves on its own terms: a
-            // missing path is a silent no-op (nothing to shadow), and a file is a hard
-            // error rather than a mount that quietly fails to hide anything.
-            if mode == Mode::Hide {
-                if spec.link().is_some() {
-                    bail!(
-                        "config mount `{raw}`: link=\"parent\" cannot combine with \
-                         mode=\"hide\" — it would hide the symlink target's parent dir"
-                    );
-                }
-                if let Some((p, mode)) = mounts::resolve_hide(&path)? {
-                    mounts.push(Mount::hide(p, mode));
-                }
-                continue;
-            }
-
-            match spec.link() {
-                Some(Link::Parent) => {
-                    let is_symlink = std::fs::symlink_metadata(&path)
-                        .map(|m| m.file_type().is_symlink())
-                        .unwrap_or(false);
-                    if !is_symlink {
-                        if spec.optional() && !path.exists() {
-                            continue;
-                        }
-                        bail!(
-                            "config mount `{raw}`: link=\"parent\" requires a symlink, \
-                             but {} is {}",
-                            path.display(),
-                            if path.exists() { "not one" } else { "missing" }
-                        );
-                    }
-                    let target = std::fs::canonicalize(&path)
-                        .with_context(|| format!("resolving symlink `{raw}`"))?;
-                    let parent = target
-                        .parent()
-                        .ok_or_else(|| anyhow!("config mount `{raw}`: target has no parent dir"))?
-                        .to_path_buf();
-                    symlinks.push(SymlinkSpec { link: path, target });
-                    mounts.push(mount(mode, parent));
-                }
-                None => {
-                    if spec.optional() && !path.exists() {
-                        continue;
-                    }
-                    mounts.push(mount(mode, mounts::canonicalize(&path)?));
-                }
-            }
-        }
-
-        self.resolve_toolchains(&mut mounts)?;
-        Ok(Resolved { mounts, symlinks })
-    }
-
-    /// Append the mounts for every enabled toolchain. Same tier as `[mounts]`, so it rides
-    /// the same dedupe/sort and an explicit `--ro`/`--rw` still wins.
-    fn resolve_toolchains(&self, mounts: &mut Vec<Mount>) -> Result<()> {
-        let expand = |raw: &str| -> Result<PathBuf> {
-            Ok(PathBuf::from(
-                shellexpand::full(raw)
-                    .with_context(|| format!("expanding toolchain path `{raw}`"))?
-                    .into_owned(),
-            ))
-        };
-
-        for (name, spec) in &self.toolchains {
-            let Some(r) = recipe(name) else {
-                bail!("unknown toolchain `{name}` (known: {})", known_toolchains());
-            };
-            let mode = match spec.mode() {
-                ToolchainMode::Ro => Mode::Ro,
-                ToolchainMode::Rw => Mode::Rw,
-                ToolchainMode::Overlay => bail!(
-                    "toolchain `{name}`: mode \"overlay\" is not implemented yet — use \
-                     \"ro\" or \"rw\""
-                ),
-            };
-
-            // Presence is the primary path. Absent + optional is a silent skip; absent and
-            // not optional is the loud failure the user asked for -- a toolchain named in
-            // config is one you meant to have, and quietly falling back to the system copy
-            // is the confusing outcome.
-            let primary = expand(r.primary)?;
-            if !primary.exists() {
-                if spec.optional() {
-                    continue;
-                }
-                bail!(
-                    "toolchain `{name}` is enabled but not installed ({} is missing) — \
-                     mark it `{{ mode = \"{}\", optional = true }}` to skip when absent",
-                    primary.display(),
-                    if mode == Mode::Rw { "rw" } else { "ro" }
-                );
-            }
-
-            // Everything present is mounted; a missing cache/version dir is skipped, not an
-            // error -- those are created on first use, so a fresh install lacks them.
-            for raw in r.install {
-                let path = expand(raw)?;
-                if path.exists() {
-                    mounts.push(mount(mode, mounts::canonicalize(&path)?));
-                }
-            }
-            for raw in r.cache {
-                let path = expand(raw)?;
-                if path.exists() {
-                    mounts.push(Mount::rw(mounts::canonicalize(&path)?));
-                }
-            }
-        }
-        Ok(())
+        // `None`: the global config has no directory a relative path could sensibly mean,
+        // so it keeps its long-standing behaviour of leaving one to the OS. Project files
+        // pass their own directory — see `resolve_specs`.
+        resolve_specs(&self.mounts, &self.toolchains, None)
     }
 }
 
+/// Expand `~`/`$VAR` in a config path, resolving a relative result against `base`.
+///
+/// `base` is `Some` only for project files (`local.rs`), where `"../support/thing" = "rw"`
+/// is the natural thing to write and has to mean "next to *this file*" — not next to the
+/// cwd, which varies with whichever subdirectory `lim` happened to be run from.
+fn expand(raw: &str, base: Option<&Path>) -> Result<PathBuf> {
+    let expanded =
+        shellexpand::full(raw).with_context(|| format!("expanding config mount path `{raw}`"))?;
+    let path = PathBuf::from(expanded.as_ref());
+    Ok(match base {
+        Some(dir) if path.is_relative() => dir.join(path),
+        _ => path,
+    })
+}
+
+/// Turn a `[mounts]` + `[toolchains]` pair into mounts and symlinks.
+///
+/// Shared by the global config and by project files, deliberately: `hide`'s existence
+/// rules, `link = "parent"`, `optional`, and the toolchain `RECIPES` all behave identically
+/// in both because there is exactly one implementation of them. Two copies would drift, and
+/// the drift would be silent — a `hide` that quietly stopped being optional in one of them
+/// looks like nothing at all.
+pub(crate) fn resolve_specs(
+    mount_specs: &HashMap<String, MountSpec>,
+    toolchains: &HashMap<String, ToolchainSpec>,
+    base: Option<&Path>,
+) -> Result<Resolved> {
+    let mut mounts = Vec::new();
+    let mut symlinks = Vec::new();
+
+    for (raw, spec) in mount_specs {
+        let path = expand(raw, base)?;
+        let mode = spec.mode();
+
+        // `hide` has no host source to bind, so it resolves on its own terms: a
+        // missing path is a silent no-op (nothing to shadow), and a file is a hard
+        // error rather than a mount that quietly fails to hide anything.
+        if mode == Mode::Hide {
+            if spec.link().is_some() {
+                bail!(
+                    "config mount `{raw}`: link=\"parent\" cannot combine with \
+                     mode=\"hide\" — it would hide the symlink target's parent dir"
+                );
+            }
+            if let Some((p, mode)) = mounts::resolve_hide(&path)? {
+                mounts.push(Mount::hide(p, mode));
+            }
+            continue;
+        }
+
+        match spec.link() {
+            Some(Link::Parent) => {
+                let is_symlink = std::fs::symlink_metadata(&path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if !is_symlink {
+                    if spec.optional() && !path.exists() {
+                        continue;
+                    }
+                    bail!(
+                        "config mount `{raw}`: link=\"parent\" requires a symlink, but {} is {}",
+                        path.display(),
+                        if path.exists() { "not one" } else { "missing" }
+                    );
+                }
+                let target = std::fs::canonicalize(&path)
+                    .with_context(|| format!("resolving symlink `{raw}`"))?;
+                let parent = target
+                    .parent()
+                    .ok_or_else(|| anyhow!("config mount `{raw}`: target has no parent dir"))?
+                    .to_path_buf();
+                symlinks.push(SymlinkSpec { link: path, target });
+                mounts.push(mount(mode, parent));
+            }
+            None => {
+                if spec.optional() && !path.exists() {
+                    continue;
+                }
+                mounts.push(mount(mode, mounts::canonicalize(&path)?));
+            }
+        }
+    }
+
+    resolve_toolchains(toolchains, &mut mounts)?;
+    Ok(Resolved { mounts, symlinks })
+}
+
+/// Append the mounts for every enabled toolchain. Same tier as `[mounts]`, so it rides
+/// the same dedupe/sort and an explicit `--ro`/`--rw` still wins.
+///
+/// No `base`: every recipe path is `~`-anchored, so there is no relative path here for a
+/// project file's directory to mean anything to.
+fn resolve_toolchains(
+    toolchains: &HashMap<String, ToolchainSpec>,
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    let expand = |raw: &str| -> Result<PathBuf> {
+        Ok(PathBuf::from(
+            shellexpand::full(raw)
+                .with_context(|| format!("expanding toolchain path `{raw}`"))?
+                .into_owned(),
+        ))
+    };
+
+    for (name, spec) in toolchains {
+        let Some(r) = recipe(name) else {
+            bail!("unknown toolchain `{name}` (known: {})", known_toolchains());
+        };
+        let mode = match spec.mode() {
+            ToolchainMode::Ro => Mode::Ro,
+            ToolchainMode::Rw => Mode::Rw,
+            ToolchainMode::Overlay => bail!(
+                "toolchain `{name}`: mode \"overlay\" is not implemented yet — use \
+                     \"ro\" or \"rw\""
+            ),
+        };
+
+        // Presence is the primary path. Absent + optional is a silent skip; absent and
+        // not optional is the loud failure the user asked for -- a toolchain named in
+        // config is one you meant to have, and quietly falling back to the system copy
+        // is the confusing outcome.
+        let primary = expand(r.primary)?;
+        if !primary.exists() {
+            if spec.optional() {
+                continue;
+            }
+            bail!(
+                "toolchain `{name}` is enabled but not installed ({} is missing) — \
+                     mark it `{{ mode = \"{}\", optional = true }}` to skip when absent",
+                primary.display(),
+                if mode == Mode::Rw { "rw" } else { "ro" }
+            );
+        }
+
+        // Everything present is mounted; a missing cache/version dir is skipped, not an
+        // error -- those are created on first use, so a fresh install lacks them.
+        for raw in r.install {
+            let path = expand(raw)?;
+            if path.exists() {
+                mounts.push(mount(mode, mounts::canonicalize(&path)?));
+            }
+        }
+        for raw in r.cache {
+            let path = expand(raw)?;
+            if path.exists() {
+                mounts.push(Mount::rw(mounts::canonicalize(&path)?));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The two modes that are host binds. `Hide` never reaches here — it short-circuits
-/// earlier in `resolve`, because it has no host source and its own existence rules.
+/// earlier in `resolve_specs`, because it has no host source and its own existence rules.
 fn mount(mode: Mode, path: PathBuf) -> Mount {
     match mode {
         Mode::Ro => Mount::ro(path),
