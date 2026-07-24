@@ -125,6 +125,31 @@ impl Context {
             .join("limes")
     }
 
+    /// `~/.local/share/limes` (honoring `$XDG_DATA_HOME`).
+    ///
+    /// `data_root` and `launcher_path` above predate this and hardcode `~/.local/share`.
+    /// That asymmetry is deliberate rather than an oversight: `data_root` is baked into a
+    /// generated systemd unit, so honoring the variable there would relocate every image
+    /// and layer the next time anyone re-bootstraps. With `$XDG_DATA_HOME` unset — the
+    /// common case — the two spellings are the same path anyway.
+    fn data_dir(&self) -> PathBuf {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.home.join(".local/share"))
+            .join("limes")
+    }
+
+    /// Where approvals for `.limes.local.toml` project files are recorded (see `trust.rs`).
+    ///
+    /// Data, not config, and the distinction is load-bearing: `~/.config/limes` is the kind
+    /// of directory a dotfiles repo syncs, and a trust record is one approval of one file's
+    /// exact bytes *on one machine* — propagating it would authorise a different file at the
+    /// same path elsewhere. Living under `~/.local` also keeps it out of the sandbox
+    /// entirely, since nothing mounts that wholesale (see `agents.rs`).
+    pub fn trust_dir(&self) -> PathBuf {
+        self.data_dir().join("trust")
+    }
+
     /// Per-machine config file (standing default mounts, future settings).
     /// Unmanaged, like `~/.gitconfig` — never symlinked from a dotfiles repo.
     pub fn config_file(&self) -> PathBuf {
