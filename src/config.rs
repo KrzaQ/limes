@@ -65,7 +65,8 @@ pub struct Config {
     /// built-in default: on when a GPU is present, a no-op when none is — see `gpu_devices`.
     #[serde(default)]
     gpu: Option<bool>,
-    /// Host toolchains to mirror in, keyed by name (`rbenv`, `rust`, `uv`), each with a mode.
+    /// Host toolchains to mirror in, keyed by name (`rbenv`, `rust`, `uv`, `npm`, `nvm`), each
+    /// with a mode.
     /// Empty unless a config asks: nothing is mounted by surprise. Merged across drop-ins
     /// like `[mounts]`, so a later file can restate a toolchain at a different mode.
     #[serde(default)]
@@ -174,6 +175,19 @@ const RECIPES: &[Recipe] = &[
         install: &["~/.local/bin/uv", "~/.local/share/uv"],
         cache: &["~/.cache/uv"],
     },
+    // node's package cache and any global installs. node itself is usually the system one
+    // (arriving through the `/usr` mirror), so this is mostly about `~/.npm` -- and above all
+    // `~/.npm/_npx`, so an `npx <server>` (an MCP server launched that way) reuses the host's
+    // download instead of refetching inside every sandbox. It sits in `cache`, always rw,
+    // because npx cannot populate a read-only one; `~/.npm-global` (a user-level `-g` prefix)
+    // rides the chosen mode. No auth token lives here -- npm keeps that in `~/.npmrc`, a file
+    // this recipe never mounts -- but sharing `~/.npm` rw does let a sandbox write the host's
+    // package cache, the same trust already extended to cargo's registry above.
+    Recipe { name: "npm", primary: "~/.npm", install: &["~/.npm-global"], cache: &["~/.npm"] },
+    // nvm's node installs, for a host that uses it rather than the distro's node. Keyed off
+    // `~/.nvm`, so it simply skips where node is the system's (npm's cache still comes via the
+    // `npm` recipe, which is independent of how node was installed).
+    Recipe { name: "nvm", primary: "~/.nvm", install: &["~/.nvm"], cache: &[] },
 ];
 
 fn recipe(name: &str) -> Option<&'static Recipe> {

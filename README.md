@@ -239,6 +239,8 @@ managed pythons resolve exactly as they do outside):
 uv    = "ro"                          # pythons + tools visible; not mutable from inside
 rust  = "ro"                          # host rustup toolchains + cargo, registry cache shared
 rbenv = { mode = "rw", optional = true }   # installs inside reach the host; skip if absent
+npm   = { mode = "ro", optional = true }   # ~/.npm cache (incl. npx) shared, so `npx` reuses it
+nvm   = { mode = "ro", optional = true }   # host's nvm node installs, if node comes from nvm
 ```
 
 Modes: `ro` (run the installed versions, can't add/remove them), `rw` (also `gem install` /
