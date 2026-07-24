@@ -8,7 +8,7 @@
 //! Every mode still governs `/path` → `/path`. The same-path invariant is intact; `Hide`
 //! simply has no source to differ from.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -150,6 +150,38 @@ pub fn mode_opt(mode: u32) -> String {
 /// the must-exist rule on purpose.
 pub fn canonicalize(p: &Path) -> Result<PathBuf> {
     p.canonicalize().with_context(|| format!("cannot mount {}: no such path on host", p.display()))
+}
+
+/// Resolve as much of `p` as exists, keeping the rest lexically.
+///
+/// For comparing two paths when one of them may not be there yet — `run::guard_trust_store`
+/// asks whether an rw mount contains the trust store, and the store does not exist until
+/// something has been approved. Plain `canonicalize` fails outright on that, and comparing
+/// the raw paths instead is wrong in both directions: a `..` component fakes a match, and a
+/// symlinked ancestor hides a real one. Hiding a real one is the direction that matters.
+pub fn resolve_existing(p: &Path) -> PathBuf {
+    let comps: Vec<Component> = p.components().collect();
+    // Longest existing prefix first. `canonicalize` on it resolves symlinks the only way
+    // that is actually correct; the remainder is then folded in lexically, which is safe
+    // *because* those components do not exist and so cannot be symlinks — collapsing `x/..`
+    // on a path that does exist would be a real bug.
+    for i in (0..=comps.len()).rev() {
+        let prefix: PathBuf = comps[..i].iter().collect();
+        let Ok(mut out) = prefix.canonicalize() else { continue };
+        for c in &comps[i..] {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        return out;
+    }
+    // Nothing along the chain resolves; the caller's own comparison is as good as anything
+    // we could invent.
+    p.to_path_buf()
 }
 
 /// Resolve a `hide` target, shared by the CLI flag and config so the two can't drift.
