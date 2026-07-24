@@ -184,6 +184,8 @@ pub fn doctor(ctx: &Context) -> Result<()> {
     };
     r.add(health, "rosa", detail);
 
+    trust_store(ctx, &mut r);
+
     println!("limes doctor:");
     r.print();
     if r.any_fail() {
@@ -192,6 +194,46 @@ pub fn doctor(ctx: &Context) -> Result<()> {
         println!("\nAll good.");
     }
     Ok(())
+}
+
+/// The project-file approval store: where it is, how much is in it, and — the part that is
+/// a check rather than a fact — whether the machine's own config would hand it to a sandbox
+/// read-write.
+///
+/// `run::guard_trust_store` refuses that at the point it would matter, but only for a run in
+/// some particular workspace. A standing `~/.local/share = "rw"` in a config drop-in breaks
+/// every sandbox on the machine, and this is where you find that out without having to be
+/// standing anywhere in particular.
+fn trust_store(ctx: &Context, r: &mut Report) {
+    let dir = ctx.trust_dir();
+
+    // Resolved the same way the guard resolves it, so the two cannot disagree about whether
+    // a mount contains the store.
+    let store = crate::mounts::resolve_existing(&dir);
+    let offender = crate::config::load(ctx).ok().flatten().and_then(|c| {
+        let resolved = c.resolve().ok()?;
+        resolved
+            .mounts
+            .into_iter()
+            .filter(|m| m.kind == crate::mounts::Kind::Rw)
+            .find(|m| store.starts_with(crate::mounts::resolve_existing(&m.path)))
+    });
+
+    if let Some(m) = offender {
+        r.add(
+            Health::Fail,
+            "trust store",
+            format!(
+                "config mounts {} read-write, so a sandbox could approve its own \
+                 .limes.local.toml",
+                m.path.display()
+            ),
+        );
+        return;
+    }
+
+    let count = crate::trust::list(&dir).map(|v| v.len()).unwrap_or(0);
+    r.add(Health::Ok, "trust store", format!("{} ({count} approved)", dir.display()));
 }
 
 /// macOS has no daemon, no image and no prerequisites — roughly half the Linux report
@@ -232,6 +274,8 @@ pub fn doctor(ctx: &Context) -> Result<()> {
         (false, None) => (Health::Warn, "not installed (optional secret broker)".into()),
     };
     r.add(health, "rosa", detail);
+
+    trust_store(ctx, &mut r);
 
     println!("limes doctor (macOS / Seatbelt backend):");
     r.print();
