@@ -79,6 +79,7 @@ lim --dry-run             # print the docker commands it would execute, and stop
 lim --no-agents           # don't mount claude/opencode/cursor
 lim --no-gpg --no-docker  # turn off individual forwards for one run
 
+lim trust add             # approve this project's .limes.local.toml (see below)
 lim bootstrap             # one-time: set up the rootless daemon + build the image
 lim doctor                # health check of the installation
 lim build                 # (re)build the image
@@ -285,6 +286,76 @@ permission to it.
 `config.d/` is for whole files owned by tools or installers — e.g. a dotfiles repo can ship
 one declaring its shell rc files with `link = "parent"`, so your full shell environment
 mirrors into the sandbox without limes needing to know anything about it.
+
+## Per-project settings
+
+Some mounts belong to one project and nowhere else. Put them in a **`.limes.local.toml`**
+next to the project:
+
+```toml
+[mounts]
+"~/code/shared/support" = "rw"
+"../sibling-checkout"   = "ro"       # relative to THIS FILE, not your cwd
+```
+
+Same two tables as `config.toml` — `[mounts]` and `[toolchains]`, with the same modes and
+the same `link`/`optional` behaviour. Machine-wide settings (`[forward]`, `data_root`,
+`host_network`, `gpu`, `hostname_suffix`) are refused here, naming the file: a project
+does not get to decide how your machine runs every sandbox.
+
+Every `.limes.local.toml` from the current directory **up to `$HOME`** applies,
+shallowest-first, so a file at `~/code/work/` covers every repo beneath it — including ones
+you clone next month — and a per-repo file refines it. That is also what makes `cd src &&
+lim` keep the project's mounts instead of silently dropping them.
+
+The file is untracked by design: it names absolute host paths that mean nothing on anyone
+else's machine. `.limes.toml` (no `.local`) is deliberately unclaimed.
+
+### Approving it
+
+The workspace is mounted **read-write**, so a project file limes obeyed unconditionally
+would let anything inside the sandbox grant itself a mount by appending to it. So limes
+obeys one only after you approve it, and any edit revokes that until you approve it again —
+the same bargain direnv makes with `.envrc`:
+
+```
+lim trust init      # write a starter .limes.local.toml here
+lim trust add       # approve the project files in effect here
+lim trust           # what's approved, and what's pending
+lim trust revoke    # withdraw approval
+```
+
+An unapproved or edited file refuses the run and prints what it would grant, or what
+changed:
+
+```
+$ lim
+Error: refusing to run: an unapproved project file is in effect
+
+  /home/you/code/proj/.limes.local.toml — changed since it was approved
+      - /srv/data  ro
+      + /srv/data  rw
+
+review the above, then run `lim trust add` to approve it
+```
+
+Approvals are byte-exact copies kept in `$XDG_DATA_HOME/limes/trust/` — **data, not
+config**, so a dotfiles repo never syncs them: an approval is of one file's exact contents
+on one machine, and propagating it would authorise a different file at the same path
+somewhere else. Nothing mounts `~/.local` wholesale, so the store is not visible inside a
+sandbox at all; if some config ever made it writable from inside, limes refuses to run
+rather than pretend the gate still holds, and `lim doctor` reports the same.
+
+`lim trust add` also offers to teach git to ignore the file — `core.excludesFile` (every
+repo on this machine), `.gitignore`, or `.git/info/exclude` — and skips the offer entirely
+once something already ignores it. `--ignore global|gitignore|exclude|none` chooses without
+being asked, for scripts and over ssh; without a terminal it prints a hint and carries on,
+so `lim trust add` never needs one.
+
+A useful side effect of the gate: it is a **tripwire**. An approval failure you did not
+cause means something inside a sandbox reached for its own policy.
+
+`--no-local` ignores project files for one run, the way `--no-config` ignores the machine's.
 
 ## Building
 

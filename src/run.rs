@@ -12,9 +12,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::Result;
 #[cfg(target_os = "linux")]
-use anyhow::{Context as _, bail};
+use anyhow::Context as _;
+use anyhow::{Result, bail};
 
 use crate::RunArgs;
 use crate::agents;
@@ -22,6 +22,7 @@ use crate::config;
 use crate::context::{self, Context};
 #[cfg(target_os = "linux")]
 use crate::identity;
+use crate::local;
 use crate::mounts::{self, Mount};
 #[cfg(target_os = "linux")]
 use crate::mounts::{Bind, MountArg, Tmpfs};
@@ -45,6 +46,7 @@ fn assemble_mounts(
     ctx: &Context,
     args: &RunArgs,
     cfg: &Option<config::Config>,
+    local: config::Resolved,
     workspace: &Path,
     extra: Vec<Mount>,
 ) -> Result<(Vec<Mount>, Vec<config::SymlinkSpec>)> {
@@ -61,6 +63,11 @@ fn assemble_mounts(
         mounts.extend(resolved.mounts);
         symlinks = resolved.symlinks;
     }
+    // Approved `.limes.local.toml` files, already ordered shallowest-first by `local::load`
+    // so a per-repo file beats the shared one above it. More specific than the machine's
+    // config, less so than a flag typed for this run.
+    mounts.extend(local.mounts);
+    symlinks.extend(local.symlinks);
     // User-supplied holes (canonicalized; must exist on host). `--rw` after `--ro`
     // so a path given both ways ends up writable, and `--hide` after both: it is the
     // safety direction, so `--rw X --hide X` hides.
@@ -77,9 +84,52 @@ fn assemble_mounts(
         }
     }
 
+    guard_trust_store(&mounts, &ctx.trust_dir())?;
     dedupe(&mut mounts);
     mounts::sort_for_nesting(&mut mounts);
     Ok((mounts, symlinks))
+}
+
+/// The project files' contribution, or nothing when `--no-local` says so.
+///
+/// Shared by both backends rather than inlined twice: the gate has to be impossible to
+/// reach one path without, and a second copy is how one of them ends up not calling it.
+fn local_mounts(ctx: &Context, args: &RunArgs, workspace: &Path) -> Result<config::Resolved> {
+    if args.no_local {
+        return Ok(config::Resolved { mounts: Vec::new(), symlinks: Vec::new() });
+    }
+    local::load(&ctx.trust_dir(), &ctx.home, workspace)
+}
+
+/// Refuse any policy that would let the sandbox write the trust store.
+///
+/// The whole of `local.rs`'s gate rests on the approvals living somewhere the sandbox
+/// cannot reach. Nothing mounts `~/.local` wholesale today — `agents.rs` avoids it
+/// deliberately — but a config drop-in is free to, and the failure would be *silent*: the
+/// gate would keep printing refusals and keep approving whatever a sandbox had written.
+/// Checked before `dedupe` so a widening entry cannot be collapsed away before we look.
+///
+/// Only `Rw` matters. A `Hide` over the store leaves it unwritable and unreadable inside,
+/// which is the status quo; `Ro` hands over an approval ledger that grants nothing on its
+/// own, and the store's own contents are not secrets.
+fn guard_trust_store(mounts: &[Mount], trust_dir: &Path) -> Result<()> {
+    // Both sides resolved as far as they exist, not compared as written: `starts_with` is
+    // component-wise, so a `..` in either path would fake a match, and — the direction that
+    // actually matters — a symlinked `~/.local` would hide a real one.
+    let store = mounts::resolve_existing(trust_dir);
+    for m in mounts.iter().filter(|m| m.kind == mounts::Kind::Rw) {
+        if store.starts_with(mounts::resolve_existing(&m.path)) {
+            bail!(
+                "refusing to run: `{}` is mounted read-write, which puts the project-file \
+                 trust store ({}) inside the sandbox.\n  \
+                 A sandbox that can write its own approvals is not gated at all — narrow \
+                 that mount, or hide the store inside it.",
+                m.path.display(),
+                trust_dir.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Everything docker will be told about this sandbox, in one value.
@@ -131,6 +181,10 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     let cfg = if args.no_config { None } else { config::load(ctx)? };
     let forwards = Forwards::resolve(args, cfg.as_ref().map(|c| c.forward()));
 
+    // Project files, gated on the trust store — this is where an unapproved or edited
+    // `.limes.local.toml` refuses the run, before anything has been created.
+    let local = local_mounts(ctx, args, &workspace)?;
+
     // Auto-detected agents (program files ro, state dirs rw), plus rosa's socket and
     // client binary — both same-path, so they ride the normal precedence chain rather
     // than being bolted on as raw binds the way ssh/gpg have to be.
@@ -174,7 +228,7 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         Vec::new()
     };
 
-    let (table, mut symlinks) = assemble_mounts(ctx, args, &cfg, &workspace, extra)?;
+    let (table, mut symlinks) = assemble_mounts(ctx, args, &cfg, local, &workspace, extra)?;
     // An agent's launcher symlink is recreated the same way config's `link = "parent"`
     // entries are — one prelude, one mechanism.
     symlinks.extend(detected.symlinks);
@@ -501,12 +555,13 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
 
     let workspace = std::env::current_dir()?;
     let cfg = if args.no_config { None } else { config::load(ctx)? };
+    let local = local_mounts(ctx, args, &workspace)?;
 
     // Agents still matter, but only for their *state* dirs: the program files are already
     // on the host and readable, while `~/.claude` must be writable under the base deny.
     let detected = agents::detect(ctx, args);
     let (mounts, _symlinks) =
-        assemble_mounts(ctx, args, &cfg, &workspace, detected.mounts.clone())?;
+        assemble_mounts(ctx, args, &cfg, local, &workspace, detected.mounts.clone())?;
 
     // Seatbelt matches resolved paths, so the temp dir must be canonical
     // (`/private/var/folders/…`); `canonicalize` is realpath.
@@ -814,6 +869,43 @@ mod tests {
         let mut m = vec![Mount::hide("/a".into(), 0o700), Mount::ro("/a".into())];
         dedupe(&mut m);
         assert_eq!(m, vec![Mount::ro("/a".into())], "and is itself overridable");
+    }
+
+    /// The assertion `local.rs`'s whole gate rests on. Nothing mounts `~/.local` wholesale
+    /// today, but a config drop-in could, and the resulting hole would be silent: refusals
+    /// would still print while the sandbox quietly approved its own files.
+    #[test]
+    fn an_rw_mount_over_the_trust_store_is_refused() {
+        let store = Path::new("/home/u/.local/share/limes/trust");
+        let err = guard_trust_store(&[Mount::rw("/home/u/.local/share".into())], store)
+            .expect_err("an rw ancestor of the store must refuse");
+        assert!(err.to_string().contains("trust store"), "got: {err}");
+
+        guard_trust_store(&[Mount::rw("/home/u/code".into())], store)
+            .expect("an unrelated rw mount is fine");
+        guard_trust_store(&[Mount::ro("/home/u/.local/share".into())], store)
+            .expect("read-only grants nothing the gate depends on");
+    }
+
+    /// The store's own directory, not just an ancestor of it — the obvious way to write the
+    /// check tests `starts_with` in the wrong direction and misses the exact match.
+    #[test]
+    fn an_rw_mount_of_the_store_itself_is_refused() {
+        let store = Path::new("/home/u/.local/share/limes/trust");
+        assert!(guard_trust_store(&[Mount::rw(store.to_path_buf())], store).is_err());
+    }
+
+    /// `starts_with` is component-wise, so an unresolved `..` makes an unrelated store look
+    /// contained. Found by a smoke test whose `XDG_DATA_HOME` happened to be written that
+    /// way; the same lexical comparison hides a real containment behind a symlink, which is
+    /// the direction worth caring about.
+    #[test]
+    fn dot_dot_components_do_not_fake_containment() {
+        let tmp = std::env::temp_dir().canonicalize().unwrap_or_else(|_| "/tmp".into());
+        let ws = tmp.join("limes-guard-ws");
+        let store = ws.join("../limes-guard-store/trust");
+        guard_trust_store(&[Mount::rw(ws)], &store)
+            .expect("`..` climbs back out of the mount, so the store is not inside it");
     }
 
     /// What `dedupe`'s "copy the *whole* kind" comment is about, now that a kind carries

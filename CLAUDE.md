@@ -82,6 +82,17 @@ These are load-bearing; breaking one silently defeats the tool.
   deliberately never mounts `~/.local` wholesale for the same reason.
 - **A mount path that doesn't exist on the host is a hard error**, not a silently-created
   empty dir. The only exception is config's `optional = true`.
+- **A project file is policy the sandbox can write, so it is gated.** `.limes.local.toml`
+  lives in the workspace — the one tree mounted read-write — so obeying one unconditionally
+  would let anything inside grant itself a mount by appending to it. `trust.rs` records a
+  byte-exact copy of what was approved under `$XDG_DATA_HOME/limes/trust/`, and any
+  difference refuses the run *and prints the delta*, for the same reason `policy.rs` prints
+  its diff. The gate rests entirely on the store being unreachable from inside:
+  `run::guard_trust_store` hard-fails if any `rw` mount contains it, `doctor` reports the
+  standing half of that, and both compare via `mounts::resolve_existing` rather than
+  lexically — a symlinked ancestor would otherwise hide a real containment. Never make the
+  store `$XDG_CONFIG_HOME`-shaped: that directory is synced by dotfiles, and an approval is
+  of one file's bytes *on one machine*.
 
 ## Two backends
 
@@ -114,7 +125,7 @@ pushed **least-to-most explicit**, then `dedupe()` collapses exact-path collisio
 *last wins*, then `sort_for_nesting()` orders parent-before-child:
 
 ```
-built-in defaults  →  detected agents  →  rosa  →  system gitconfig  →  workspace (rw)  →  config.toml/config.d  →  --ro  →  --rw  →  --hide
+built-in defaults  →  detected agents  →  rosa  →  system gitconfig  →  workspace (rw)  →  config.toml/config.d  →  .limes.local.toml  →  --ro  →  --rw  →  --hide
 ```
 
 So a config entry overrides an implicit default, a CLI flag overrides config, and `--rw`
@@ -171,6 +182,22 @@ can name credential dirs that exist on only some machines). A sibling `overlay` 
 (ephemeral writes over a host tree, via a `local`-driver overlayfs volume) is wanted but
 unbuilt — it rests on a bind nested *inside* an overlay volume, which is untested and is
 the live case today, since `~/.config/opencode` sits inside the drop-in's `~/.config`.
+
+**`local.rs` + `trust.rs`** are the per-project half of config. `local.rs` walks from the
+workspace up to (not including) `$HOME` collecting `.limes.local.toml`, applies them
+**shallowest-first** — so a file at `~/code/work` covers every repo beneath it and a
+per-repo file refines rather than replaces it — and slots the result between config and the
+CLI flags. Its schema is deliberately *smaller* than `Config`'s (`[mounts]` + `[toolchains]`
+only) but shares config's spec types through `config::resolve_specs`, so `hide`,
+`link = "parent"`, `optional` and the toolchain recipes cannot drift between the two; the
+one difference is that a relative path resolves against **the file's own directory**, not
+the cwd, which varies with the subdirectory `lim` was run from. `trust.rs` is the approval
+store plus the `lim trust init|add|list|revoke` verbs. It stores the approved *bytes*, not a
+digest, because a digest can only say "this changed" and the refusal has to say what;
+the filename key is a hand-rolled FNV-1a and is explicitly **not** a security primitive —
+all of it rests on the byte comparison, with a `.path` sidecar to catch a collision and fail
+closed. Bare `lim trust` lists rather than approving: the command typed reflexively after a
+refusal must show, never grant.
 
 **`bootstrap.rs`** writes the vendored `vendor/dockerd-rootless.sh` (from Moby, Apache-2.0,
 `include_str!`'d into the binary) to `~/.local/share/limes/bin`, renders a `limes-docker.service`
@@ -238,5 +265,7 @@ requirement, add a doctor check for it.
   (`"run \`lim bootstrap\`, then \`lim doctor\`"`).
 - `LIMES_VERSION` is set from `env!("CARGO_PKG_VERSION")` so it can never drift from
   `Cargo.toml` / `lim --version`. Scripts detect the sandbox with `[[ -n $LIMES_VERSION ]]`.
-- `config.toml.example` and the README's Configuration section must be updated together
-  whenever config gains an option.
+- `config.toml.example`, `limes.local.toml.template` and the README's Configuration section
+  must be updated together whenever either config surface gains an option. The template is
+  the only documentation a project file gets at the point of use, so it has to state the
+  trust rule and what is *not* accepted there, not just the syntax.

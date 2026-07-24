@@ -1,0 +1,30 @@
+# .limes.local.toml — limes settings for this project, on this machine.
+#
+# Untracked by design: the paths below are absolute host paths that mean nothing on anyone
+# else's machine. `lim trust add` offers to arrange for git to ignore it.
+#
+# EVERY EDIT NEEDS `lim trust add` before the next `lim` will run. That is not ceremony:
+# limes mounts this directory read-write, so a file here that limes obeyed unconditionally
+# would let anything in the sandbox grant itself a mount by appending to it.
+#
+# A file placed in a *parent* directory applies to every project beneath it, so shared
+# checkouts belong there rather than copied into each repo. Deeper files win.
+
+# Extra paths to expose. Same path inside the sandbox as outside, always.
+# Relative paths resolve against THIS FILE'S directory — not your shell's cwd, which
+# changes depending on which subdirectory you ran `lim` from.
+#
+# [mounts]
+# "~/code/shared/support" = "rw"
+# "../sibling-checkout"   = "ro"
+# "./vendor"              = { mode = "ro", optional = true }   # skip when absent
+# "~/.config/gh"          = "hide"                             # empty inside, hiding the host's
+
+# Host toolchains to mirror in: rbenv, rust, uv, npm, nvm.
+#
+# [toolchains]
+# uv = "ro"
+
+# Not accepted here: [forward], data_root, host_network, gpu, hostname_suffix.
+# Those decide how this machine runs every sandbox, so they live in
+# ~/.config/limes/config.toml — a project does not get to choose them.

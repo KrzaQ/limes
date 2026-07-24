@@ -8,8 +8,10 @@ mod agents;
 mod config;
 mod context;
 mod doctor;
+mod local;
 mod mounts;
 mod run;
+mod trust;
 mod util;
 
 // The container backend. On macOS there is no daemon, no image and no container object,
@@ -78,6 +80,11 @@ enum Commands {
     Bootstrap(BootstrapArgs),
     /// Report installation health
     Doctor,
+    /// Approve the `.limes.local.toml` project files a sandbox may obey
+    Trust {
+        #[command(subcommand)]
+        action: Option<TrustAction>,
+    },
     /// List running limes sandboxes
     #[command(alias = "ps")]
     Status,
@@ -135,6 +142,45 @@ enum Commands {
     },
 }
 
+/// The four verbs over the approval store. A noun-verb pair rather than four flat
+/// subcommands so that `lim trust --help` shows the whole lifecycle in one place — which is
+/// where someone who has just hit their first refusal will look.
+#[derive(Subcommand, Clone)]
+pub enum TrustAction {
+    /// Write a starter .limes.local.toml here (it still needs `lim trust add`)
+    Init,
+    /// Approve the project files in effect here
+    Add {
+        /// Where to add git's ignore rule for .limes.local.toml, without being asked
+        #[arg(long, value_name = "WHERE")]
+        ignore: Option<IgnoreTarget>,
+    },
+    /// Show what is approved [default]
+    List {
+        /// Every record in the store, not just this tree's
+        #[arg(long)]
+        all: bool,
+    },
+    /// Withdraw approval
+    Revoke {
+        /// Paths to withdraw (default: the project files in effect here)
+        paths: Vec<PathBuf>,
+    },
+}
+
+/// Where `lim trust add` may put git's ignore rule.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq)]
+pub enum IgnoreTarget {
+    /// core.excludesFile — every repo on this machine
+    Global,
+    /// .gitignore — this repo, shared with everyone who clones it
+    Gitignore,
+    /// .git/info/exclude — this repo, only for you
+    Exclude,
+    /// Leave git alone
+    None,
+}
+
 impl Commands {
     /// Subcommand name, for the Linux-only diagnostic on other platforms.
     #[cfg(not(target_os = "linux"))]
@@ -143,6 +189,7 @@ impl Commands {
             Commands::Run(_) => "run",
             Commands::Bootstrap(_) => "bootstrap",
             Commands::Doctor => "doctor",
+            Commands::Trust { .. } => "trust",
             Commands::Status => "status",
             Commands::Docker { .. } => "docker",
             Commands::Compose { .. } => "compose",
@@ -193,6 +240,12 @@ pub struct RunArgs {
     /// Ignore ~/.config/limes/config.toml for this run
     #[arg(long)]
     pub no_config: bool,
+    // Its own flag rather than a widening of `--no-config`: the two name different files
+    // with different trust stories, and "ignore the machine's settings" and "ignore this
+    // project's" are separately useful things to want.
+    /// Ignore any .limes.local.toml project files for this run
+    #[arg(long)]
+    pub no_local: bool,
 
     // Credential/socket forwards. Each is on by default and settable standing in config
     // `[forward]`; the paired flags let one run override config either way, so a standing
@@ -282,6 +335,12 @@ fn main() -> Result<()> {
         None => run::run(&ctx, &cli.run),
         Some(Commands::Run(args)) => run::run(&ctx, &args),
         Some(Commands::Doctor) => doctor::doctor(&ctx),
+        // Not in the Linux-only group below: this manages files, not containers, and it has
+        // to work wherever `lim run` does. Bare `lim trust` lists rather than approving —
+        // the command typed reflexively after a refusal must show, never grant.
+        Some(Commands::Trust { action }) => {
+            trust::command(&ctx, action.unwrap_or(TrustAction::List { all: false }))
+        }
 
         #[cfg(target_os = "linux")]
         Some(Commands::Bootstrap(args)) => bootstrap::bootstrap(&ctx, &args),
