@@ -19,6 +19,12 @@
 # "../sibling-checkout"   = "ro"
 # "./vendor"              = { mode = "ro", optional = true }   # skip when absent
 # "~/.config/gh"          = "hide"                             # empty inside, hiding the host's
+#
+# A path that is a SYMLINK on the host needs link = "parent". A plain mount
+# resolves it, so source and destination both collapse onto the target and
+# nothing lands at the symlink's own path — a tool on PATH simply isn't there
+# inside. This recreates the symlink and mounts the directory its target sits in:
+# "~/.local/bin/conan"    = { mode = "ro", link = "parent" }
 
 # Host toolchains to mirror in: rbenv, rust, uv, npm, nvm.
 #

@@ -18,10 +18,11 @@
 # "ro" is shorthand for { mode = "ro" }. The long form adds optional per-path options:
 # "~/scratch" = { mode = "rw" }
 
-# `link = "parent"` — for a symlinked dotfile. docker flattens a symlink when it mounts
-# it, so config that finds siblings relative to its own resolved path (zsh locating its
-# plugins via ~/.zshrc) breaks inside. This instead recreates the symlink in the sandbox
-# and mounts its target's parent dir, so self-locating config resolves as it does here.
+# `link = "parent"` — required for any path that is a symlink. docker flattens one when
+# it mounts it, so a plain entry collapses source and destination onto the target and
+# leaves nothing at the symlink's own path. It also breaks config that finds siblings
+# relative to its own resolved path (zsh locating its plugins via ~/.zshrc). This instead
+# recreates the symlink in the sandbox and mounts its target's parent dir.
 # "~/.zshrc" = { mode = "ro", link = "parent" }
 
 # `optional = true` — skip silently if the path is absent, for files that exist on only

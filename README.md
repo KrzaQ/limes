@@ -190,12 +190,15 @@ error, just like a bad `--ro`/`--rw` — unless `optional = true`, which skips i
 mounts override the built-in defaults but lose to CLI flags, so `--rw <path>` still wins for
 a single run, and `--no-config` ignores config entirely. See `config.toml.example`.
 
-**`link = "parent"`** handles symlinked dotfiles. docker flattens a symlink when it mounts
-it, so a config like `~/.zshrc` that finds its plugins relative to its *own* resolved path
-would break inside the sandbox. With `link = "parent"`, limes instead **recreates the
-symlink** inside (pointing at the same target) and mounts the target's **parent directory**
-ro — so siblings like a zsh `plugins/` dir come along, and self-locating config resolves
-exactly as on the host.
+**`link = "parent"`** is what any symlinked path needs. docker flattens a symlink when it
+mounts it, so a plain entry collapses source *and* destination onto the target and leaves
+nothing at the symlink's own path — a tool on `PATH` via a symlink (pipx's `~/.local/bin/*`,
+say) is simply absent inside, which reads as "the mount didn't work" rather than as a
+symlink problem. It also breaks config like `~/.zshrc` that finds its plugins relative to
+its *own* resolved path. With `link = "parent"`, limes instead **recreates the symlink**
+inside (pointing at the same target) and mounts the target's **parent directory** — so
+siblings like a zsh `plugins/` dir come along, and self-locating config resolves exactly as
+on the host.
 
 **`hide`** is the subtractive mode: the path exists inside the sandbox but is empty, and
 the host's contents are unreachable. It's for punching a hole in a mount that is otherwise
