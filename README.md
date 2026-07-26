@@ -336,10 +336,20 @@ next to the project:
 "../sibling-checkout"   = "ro"       # relative to THIS FILE, not your cwd
 ```
 
-Same two tables as `config.toml` — `[mounts]` and `[toolchains]`, with the same modes and
-the same `link`/`optional` behaviour. Machine-wide settings (`[forward]`, `data_root`,
-`host_network`, `gpu`, `hostname_suffix`) are refused here, naming the file: a project
-does not get to decide how your machine runs every sandbox.
+Same three tables as `config.toml` — `[mounts]`, `[toolchains]` and `[env]`, with the same
+modes and the same `link`/`optional` behaviour. Machine-wide settings (`[forward]`,
+`data_root`, `host_network`, `gpu`, `hostname_suffix`) are refused here, naming the file: a
+project does not get to decide how your machine runs every sandbox.
+
+`[env]` is accepted because a project's service URL or log level belongs to it as squarely
+as its mounts do, and because the table is only ever literals — nothing here reads the
+host's own environment, so the line this schema draws stays where it is. What it *can* do is
+steer which program runs: `PATH`, `LD_PRELOAD`, `BASH_ENV`, `PYTHONSTARTUP`, `NODE_OPTIONS`
+and `GIT_SSH_COMMAND` all decide that, and a `PATH` leading with a repo directory means
+anything committed there shadows the real tool inside the sandbox. That is a legitimate
+thing to want, so it isn't refused — but it is why `lim trust add` prints every name **with
+its value**, and why an edit that appends one directory to a `PATH` shows up as the two
+lines it actually is.
 
 Every `.limes.local.toml` from the current directory **up to `$HOME`** applies,
 shallowest-first, so a file at `~/code/work/` covers every repo beneath it — including ones

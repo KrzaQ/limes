@@ -31,6 +31,28 @@
 # [toolchains]
 # uv = "ro"
 
+# Variables to set inside the sandbox. The sandbox environment starts nearly empty —
+# nothing is inherited from the shell you ran `lim` in — so this is how a project's
+# service URL or log level gets there.
+#
+# Plain key/value, taken verbatim: no `~`, no $VAR, and no form that reads the host's own
+# environment. Write the absolute path or the literal value you mean.
+#
+# [env]
+# RUST_LOG    = "debug"
+# ARCESSE_URL = "http://192.0.2.10/"
+#
+# WHAT TO LOOK AT when approving one of these. A value is not just data — several
+# variables steer which program runs, and this file is in a directory the sandbox can
+# write. PATH, LD_PRELOAD, BASH_ENV, PYTHONSTARTUP, NODE_OPTIONS and GIT_SSH_COMMAND are
+# the usual ones: a PATH here that leads with a directory in the repo means anything
+# committed to it shadows the real tool inside the sandbox. That may be exactly what you
+# want — `lim trust add` shows every name and its value so it is your call, not a
+# surprise.
+#
+# HOME and LIMES_VERSION are refused: limes sets them and computes against them
+# elsewhere, so a different one is a broken sandbox rather than a configured one.
+
 # Not accepted here: [forward], data_root, host_network, gpu, hostname_suffix.
 # Those decide how this machine runs every sandbox, so they live in
 # ~/.config/limes/config.toml — a project does not get to choose them.

@@ -26,7 +26,7 @@
 //! A workspace outside `$HOME` simply never meets the ceiling and walks to `/`, which needs
 //! no second rule.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -46,8 +46,11 @@ pub const FILE_NAME: &str = ".limes.local.toml";
 /// `deny_unknown_fields` turns writing one here into an error naming the file, rather than
 /// a setting that silently never happens — the same reasoning `Config` documents.
 ///
-/// The two tables it *does* carry reuse config's spec types verbatim, so `hide`,
+/// The tables it *does* carry reuse config's spec types verbatim, so `hide`,
 /// `link = "parent"`, `optional` and the toolchain recipes behave identically in both.
+/// `[env]` has no spec type to share — it is plain key/value — so what must not drift
+/// between the two is its *validation*, which is why `run::check_name` owns that rather
+/// than either config module.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Local {
@@ -55,13 +58,22 @@ pub struct Local {
     mounts: HashMap<String, MountSpec>,
     #[serde(default)]
     toolchains: HashMap<String, ToolchainSpec>,
+    /// Variables to set inside the sandbox. Accepted here because a service URL or a
+    /// `RUST_LOG` belongs to the project as squarely as its mounts do — and because the
+    /// table is *only* literals, the "machine-wide settings stay machine-wide" line this
+    /// schema draws is not crossed: nothing here reads the host's own environment.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 impl Local {
-    /// Resolve to mounts and symlinks, with relative paths taken against `dir` — the
-    /// directory the file itself sits in, not the cwd.
+    /// Resolve to mounts, symlinks and env, with relative paths taken against `dir` — the
+    /// directory the file itself sits in, not the cwd. `[env]` needs no such base: a value
+    /// is an opaque string, never a path limes interprets.
     fn resolve(&self, dir: &Path) -> Result<Resolved> {
-        config::resolve_specs(&self.mounts, &self.toolchains, Some(dir))
+        let mut r = config::resolve_specs(&self.mounts, &self.toolchains, Some(dir))?;
+        r.env = config::env_pairs(&self.env, &dir.join(FILE_NAME).display().to_string());
+        Ok(r)
     }
 
     /// What the file asks for, as `(subject, mode)` pairs, sorted.
@@ -70,6 +82,10 @@ impl Local {
     /// `lim trust add` prints before approving, and what a changed file is diffed on, so it
     /// has to work for an entry whose path does not exist on this host — which is exactly
     /// the case when a recorded old version names something since deleted.
+    ///
+    /// An `[env]` entry shows its **value** in the mode column, because that is what the
+    /// approval is of: `PATH` gaining a directory is the whole of what changed, and a line
+    /// reading `env PATH  (set)` would hide precisely the thing worth looking at.
     fn entries(&self, dir: &Path) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = self
             .mounts
@@ -80,6 +96,7 @@ impl Local {
                     .iter()
                     .map(|(n, s)| (format!("toolchain {n}"), s.mode().as_str().to_string())),
             )
+            .chain(self.env.iter().map(|(n, v)| (format!("env {n}"), v.clone())))
             .collect();
         out.sort();
         out
@@ -169,6 +186,9 @@ pub fn load(store: &Path, home: &Path, workspace: &Path) -> Result<Resolved> {
             .with_context(|| format!("in {}", f.path.display()))?;
         out.mounts.extend(resolved.mounts);
         out.symlinks.extend(resolved.symlinks);
+        // Shallowest-first, like the mounts beside them, so a per-repo file's `[env]` beats
+        // the shared one above it once `run::dedupe_env` collapses the pair.
+        out.env.extend(resolved.env);
     }
     Ok(out)
 }
@@ -416,6 +436,56 @@ mod tests {
             .expect_err("changed bytes refuse even when the policy is identical")
             .to_string();
         assert!(msg.contains("comments or formatting"), "{msg}");
+    }
+
+    /// `[env]` is accepted here, and rides the same shallowest-first order the mounts do —
+    /// so a per-repo file refines what a shared parent set rather than replacing it.
+    #[test]
+    fn env_layers_shallowest_first_like_mounts() {
+        let root = tree("env-order");
+        let deep = root.join("proj");
+        write(&root, "[env]\nRUST_LOG = \"info\"\nSHARED = \"yes\"\n");
+        write(&deep, "[env]\nRUST_LOG = \"debug\"\n");
+        let store = root.join("store");
+        for f in [root.join(FILE_NAME), deep.join(FILE_NAME)] {
+            trust::add(&store, &f, &std::fs::read(&f).unwrap()).unwrap();
+        }
+
+        let resolved = load(&store, &root.join("nonexistent-home"), &deep).unwrap();
+        let named: Vec<(String, String)> =
+            resolved.env.iter().map(|e| (e.name.clone(), e.value.clone())).collect();
+        assert_eq!(
+            named,
+            vec![
+                ("RUST_LOG".to_string(), "info".to_string()),
+                ("SHARED".to_string(), "yes".to_string()),
+                ("RUST_LOG".to_string(), "debug".to_string()),
+            ],
+            "the nested file lands last, so dedupe_env's last-wins gives it the say"
+        );
+        // Tagged with the file that asked, so `run::check_name`'s refusal names the one to
+        // edit rather than sending the reader to the machine's config.
+        assert_eq!(resolved.env[2].source, deep.join(FILE_NAME).display().to_string());
+    }
+
+    /// The approval has to be of the *value*, not merely of the fact that something is set:
+    /// a `PATH` that gains a directory is the whole of what changed, and the diff a trust
+    /// refusal prints is the only place anyone will look at it.
+    #[test]
+    fn an_env_edit_shows_the_value_in_the_delta() {
+        let root = tree("env-delta");
+        write(&root, "[env]\nPATH = \"/usr/bin\"\n");
+        let store = root.join("store");
+        let file = root.join(FILE_NAME);
+        trust::add(&store, &file, &std::fs::read(&file).unwrap()).unwrap();
+
+        write(&root, "[env]\nPATH = \"/tmp/evil:/usr/bin\"\n");
+        let msg = load(&store, &root.join("nonexistent-home"), &root)
+            .map(|_| ())
+            .expect_err("an edited file must refuse")
+            .to_string();
+        assert!(msg.contains("- env PATH  /usr/bin"), "the old value must show: {msg}");
+        assert!(msg.contains("+ env PATH  /tmp/evil:/usr/bin"), "and the new one: {msg}");
     }
 
     /// Deeper file last means deeper file wins, once `run::dedupe` collapses the pair.

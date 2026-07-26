@@ -58,7 +58,7 @@ fn assemble_mounts(
     // conveniences above, but still lose to the explicit CLI flags below). `link`
     // entries additionally produce symlinks to recreate inside the sandbox.
     let mut symlinks: Vec<config::SymlinkSpec> = Vec::new();
-    let mut env: Vec<(String, String)> = Vec::new();
+    let mut env: Vec<config::EnvEntry> = Vec::new();
     if let Some(cfg) = cfg {
         let resolved = cfg.resolve()?;
         mounts.extend(resolved.mounts);
@@ -220,7 +220,7 @@ fn resolve_env(
     args: &RunArgs,
     system_gitconfig: bool,
     forwarded: Vec<String>,
-    configured: Vec<(String, String)>,
+    configured: Vec<config::EnvEntry>,
 ) -> Result<Vec<String>> {
     let mut env = vec![
         format!("HOME={}", ctx.home.display()),
@@ -244,13 +244,13 @@ fn resolve_env(
     // Forward env before the user's, so an explicit `-e` still wins over what a forward sets.
     env.extend(forwarded);
 
-    for (name, value) in configured {
-        reserved(&name, "config")?;
-        env.push(format!("{name}={value}"));
+    for e in configured {
+        check_name(&e.name, &e.source)?;
+        env.push(format!("{}={}", e.name, e.value));
     }
     for raw in &args.env {
         let entry = cli_env(raw)?;
-        reserved(env_name(&entry), "`-e`")?;
+        check_name(env_name(&entry), "`-e`")?;
         env.push(entry);
     }
 
@@ -258,9 +258,23 @@ fn resolve_env(
     Ok(env)
 }
 
-/// Refuse a reserved name, naming where it came from and why it is refused.
+/// Refuse a name limes cannot honor, naming where it came from and why.
+///
+/// The `=` rule is not cosmetic. A TOML key is an arbitrary string, so `"HOME=x" = ""`
+/// renders as `HOME=x=` — which Docker reads as `HOME` with the value `x=`, walking straight
+/// past `RESERVED_ENV`. Rejecting the separator in a name closes that, and it costs nothing:
+/// no environment variable can contain one anyway.
 #[cfg(target_os = "linux")]
-fn reserved(name: &str, source: &str) -> Result<()> {
+fn check_name(name: &str, source: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("{source} sets a variable with an empty name");
+    }
+    if name.contains('=') {
+        bail!(
+            "{source} sets `{name}`, but an environment variable name cannot contain `=` — \
+             the name is the key, the value goes on the right of it"
+        );
+    }
     if RESERVED_ENV.contains(&name) {
         bail!(
             "{source} sets `{name}`, which limes sets itself and depends on elsewhere — \
@@ -1025,10 +1039,20 @@ mod tests {
     /// differently-configured one. Refuse, and say which side asked.
     #[test]
     fn reserved_names_are_refused_with_their_source() {
-        let err = reserved("HOME", "config").expect_err("HOME must be refused");
+        let err = check_name("HOME", "config").expect_err("HOME must be refused");
         assert!(err.to_string().contains("config sets `HOME`"), "got: {err}");
-        assert!(reserved("LIMES_VERSION", "`-e`").is_err());
-        assert!(reserved("RUST_LOG", "config").is_ok(), "ordinary names are untouched");
+        assert!(check_name("LIMES_VERSION", "`-e`").is_err());
+        assert!(check_name("RUST_LOG", "config").is_ok(), "ordinary names are untouched");
+    }
+
+    /// A TOML key is an arbitrary string, so `"HOME=x" = ""` would render as `HOME=x=` —
+    /// which Docker reads as `HOME` with the value `x=`, walking straight past the reserved
+    /// list. The name is checked before it is joined to its value, so it cannot.
+    #[test]
+    fn a_name_containing_the_separator_cannot_smuggle_a_reserved_one() {
+        let err = check_name("HOME=x", "config").expect_err("`=` in a name must be refused");
+        assert!(err.to_string().contains("cannot contain `=`"), "got: {err}");
+        assert!(check_name("", "config").is_err(), "nor an empty name");
     }
 
     /// Last-wins on an exact path is what makes the whole precedence chain work — it is

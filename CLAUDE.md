@@ -209,11 +209,18 @@ the live case today, since `~/.config/opencode` sits inside the drop-in's `~/.co
 workspace up to (not including) `$HOME` collecting `.limes.local.toml`, applies them
 **shallowest-first** — so a file at `~/code/work` covers every repo beneath it and a
 per-repo file refines rather than replaces it — and slots the result between config and the
-CLI flags. Its schema is deliberately *smaller* than `Config`'s (`[mounts]` + `[toolchains]`
-only) but shares config's spec types through `config::resolve_specs`, so `hide`,
+CLI flags. Its schema is deliberately *smaller* than `Config`'s (`[mounts]`, `[toolchains]`
+and `[env]` only) but shares config's spec types through `config::resolve_specs`, so `hide`,
 `link = "parent"`, `optional` and the toolchain recipes cannot drift between the two; the
 one difference is that a relative path resolves against **the file's own directory**, not
-the cwd, which varies with the subdirectory `lim` was run from. `trust.rs` is the approval
+the cwd, which varies with the subdirectory `lim` was run from. `[env]` has no spec type to
+share — it is plain key/value — so what must not drift is its *validation*, and that is why
+`run::check_name` owns it rather than either config module. It is accepted here at all
+because the table is only literals; `check_name` also refuses a name containing `=`, since a
+TOML key is an arbitrary string and `"HOME=x" = ""` would otherwise render as `HOME=x=` and
+walk straight past `RESERVED_ENV`. An `[env]` entry shows its **value** in the trust diff —
+a `PATH` gaining a directory is the whole of what changed, and `env PATH  (set)` would hide
+exactly the thing worth looking at. `trust.rs` is the approval
 store plus the `lim trust init|add|list|revoke` verbs. It stores the approved *bytes*, not a
 digest, because a digest can only say "this changed" and the refusal has to say what;
 the filename key is a hand-rolled FNV-1a and is explicitly **not** a security primitive —

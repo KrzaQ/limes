@@ -81,7 +81,20 @@ pub struct Config {
     env: BTreeMap<String, String>,
 }
 
-/// A config `[env]` table as ordered `(name, value)` pairs.
+/// One `[env]` entry, tagged with where it was written.
+///
+/// The tag exists for the refusal `run::check_name` prints. A project file and the machine's
+/// config feed the same list, so without it a `.limes.local.toml` that sets `HOME` is
+/// reported as "config sets `HOME`" and sends the reader to a file that says nothing of the
+/// kind — the same reason `local.rs` re-phrases `resolve_specs`' errors with the file's path.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EnvEntry {
+    pub name: String,
+    pub value: String,
+    pub source: String,
+}
+
+/// A config `[env]` table as ordered entries.
 ///
 /// **Plain key/value, deliberately.** There is no form here that reaches into the host's own
 /// environment: everything limes forwards today is an *oracle* — an agent socket, a broker —
@@ -94,8 +107,10 @@ pub struct Config {
 /// That matters more than it looks: the environment is compared exactly when joining a
 /// running sandbox, and a policy that depended on TOML's map ordering would be one whose
 /// diffs came and went.
-fn env_pairs(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    env.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+pub(crate) fn env_pairs(env: &BTreeMap<String, String>, source: &str) -> Vec<EnvEntry> {
+    env.iter()
+        .map(|(k, v)| EnvEntry { name: k.clone(), value: v.clone(), source: source.to_string() })
+        .collect()
 }
 
 /// A toolchain's `"ro"` shorthand or `{ mode = "ro", optional = true }` long form —
@@ -350,7 +365,7 @@ pub struct Resolved {
     /// `[env]`, name-ordered. Carried here rather than fetched through a separate accessor
     /// so the global config and a project file contribute it through one path, in the one
     /// place that already encodes which of them wins.
-    pub env: Vec<(String, String)>,
+    pub env: Vec<EnvEntry>,
 }
 
 impl Resolved {
@@ -490,7 +505,7 @@ impl Config {
         // so it keeps its long-standing behaviour of leaving one to the OS. Project files
         // pass their own directory — see `resolve_specs`.
         let mut r = resolve_specs(&self.mounts, &self.toolchains, None)?;
-        r.env = env_pairs(&self.env);
+        r.env = env_pairs(&self.env, "config");
         Ok(r)
     }
 }
@@ -777,8 +792,10 @@ mod tests {
     #[test]
     fn env_is_verbatim_key_value() {
         let c = parse_str("[env]\nRUST_LOG = \"debug\"\nARCESSE_URL = \"http://10.0.0.1/\"\n");
+        let named: Vec<(String, String)> =
+            c.resolve().unwrap().env.into_iter().map(|e| (e.name, e.value)).collect();
         assert_eq!(
-            c.resolve().unwrap().env,
+            named,
             vec![
                 ("ARCESSE_URL".to_string(), "http://10.0.0.1/".to_string()),
                 ("RUST_LOG".to_string(), "debug".to_string()),
