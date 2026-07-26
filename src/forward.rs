@@ -144,7 +144,13 @@ fn add_ssh_agent(p: &mut Pieces) {
         let sock = Path::new(&sock);
         if sock.exists() {
             p.binds.push(Bind::same_path(sock, false));
-            p.env.push("SSH_AUTH_SOCK".into());
+            // Spelled out rather than passed as a bare `-e SSH_AUTH_SOCK` for Docker to look
+            // up in our own environment. The two produce the same container, but only this
+            // one puts the value in the `RunSpec` — and `policy` compares the environment
+            // against `docker inspect`, where a bare name would arrive already resolved and
+            // read as a difference on every join. The socket is bound same-path, so the
+            // host's value is the value inside.
+            p.env.push(format!("SSH_AUTH_SOCK={}", sock.display()));
         }
     }
 }
@@ -267,6 +273,30 @@ mod tests {
     #[test]
     fn default_is_on() {
         assert!(enabled(None, None));
+    }
+
+    /// Every `Pieces` env entry must be a full `NAME=VALUE`. The bare `-e NAME` form Docker
+    /// also accepts would resolve from *our* environment on the way in, so it never reaches
+    /// the `RunSpec` — and `policy` compares the environment against `docker inspect`, which
+    /// reports it resolved. A bare name there reads as a difference on every single join.
+    #[test]
+    fn forwarded_env_is_always_name_equals_value() {
+        let sock = std::env::temp_dir().join(format!("limes-ssh-{}", std::process::id()));
+        std::fs::write(&sock, b"").expect("temp socket stand-in");
+        // SAFETY: single-threaded test; restored below.
+        let prev = std::env::var_os("SSH_AUTH_SOCK");
+        unsafe { std::env::set_var("SSH_AUTH_SOCK", &sock) };
+
+        let mut p = Pieces::default();
+        add_ssh_agent(&mut p);
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("SSH_AUTH_SOCK", v) },
+            None => unsafe { std::env::remove_var("SSH_AUTH_SOCK") },
+        }
+        let _ = std::fs::remove_file(&sock);
+
+        assert_eq!(p.env, vec![format!("SSH_AUTH_SOCK={}", sock.display())]);
     }
 
     #[test]
