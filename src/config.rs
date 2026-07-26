@@ -17,13 +17,17 @@
 //!
 //! [forward]
 //! gpg = false                                                 # never forward gpg here
+//!
+//! [env]
+//! RUST_LOG = "debug"                                          # set inside the sandbox
 //! ```
 //!
 //! `[forward]` carries standing on/off switches for the credential and socket forwards,
 //! for the same reason `[mounts]` exists: a preference that holds for every run on this
-//! machine belongs in a file, not in a flag you retype each time.
+//! machine belongs in a file, not in a flag you retype each time. `[env]` is the same idea
+//! for the sandbox's environment.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -71,6 +75,27 @@ pub struct Config {
     /// like `[mounts]`, so a later file can restate a toolchain at a different mode.
     #[serde(default)]
     toolchains: HashMap<String, ToolchainSpec>,
+    /// Variables to set inside the sandbox, name-as-key. See `env_pairs` for why the value
+    /// is a plain `String` and why the map is ordered.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+/// A config `[env]` table as ordered `(name, value)` pairs.
+///
+/// **Plain key/value, deliberately.** There is no form here that reaches into the host's own
+/// environment: everything limes forwards today is an *oracle* — an agent socket, a broker —
+/// never key material, and a `FOO = { host = true }` would be the first mechanism to hand a
+/// sandbox a secret it can read and copy. Literals are the useful nine tenths (`RUST_LOG`,
+/// a service URL, `CARGO_TERM_COLOR`) and cost nothing to reason about. The value is not
+/// expanded either — no `~`, no `$VAR` — so what the file says is what the sandbox gets.
+///
+/// `BTreeMap`, so a layer's contribution is name-ordered and therefore identical run to run.
+/// That matters more than it looks: the environment is compared exactly when joining a
+/// running sandbox, and a policy that depended on TOML's map ordering would be one whose
+/// diffs came and went.
+fn env_pairs(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    env.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
 /// A toolchain's `"ro"` shorthand or `{ mode = "ro", optional = true }` long form —
@@ -318,10 +343,21 @@ pub struct SymlinkSpec {
     pub target: PathBuf,
 }
 
-/// Mounts and symlinks a config asks for.
+/// Mounts, symlinks and environment a config asks for.
 pub struct Resolved {
     pub mounts: Vec<Mount>,
     pub symlinks: Vec<SymlinkSpec>,
+    /// `[env]`, name-ordered. Carried here rather than fetched through a separate accessor
+    /// so the global config and a project file contribute it through one path, in the one
+    /// place that already encodes which of them wins.
+    pub env: Vec<(String, String)>,
+}
+
+impl Resolved {
+    /// Nothing at all — the shape `--no-local` and an empty backend both need.
+    pub fn empty() -> Self {
+        Resolved { mounts: Vec::new(), symlinks: Vec::new(), env: Vec::new() }
+    }
 }
 
 /// Merge `config.toml` with every `config.d/*.toml`, or `None` if none exist.
@@ -336,6 +372,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
     let mut host_network: Option<bool> = None;
     let mut gpu: Option<bool> = None;
     let mut toolchains: HashMap<String, ToolchainSpec> = HashMap::new();
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
     let mut found = false;
 
     if let Ok(entries) = std::fs::read_dir(ctx.config_d_dir()) {
@@ -354,6 +391,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
             host_network = cfg.host_network.or(host_network);
             gpu = cfg.gpu.or(gpu);
             toolchains.extend(cfg.toolchains);
+            env.extend(cfg.env);
             found = true;
         }
     }
@@ -366,6 +404,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         host_network = cfg.host_network.or(host_network);
         gpu = cfg.gpu.or(gpu);
         toolchains.extend(cfg.toolchains);
+        env.extend(cfg.env);
         found = true;
     }
 
@@ -378,6 +417,7 @@ pub fn load(ctx: &Context) -> Result<Option<Config>> {
         host_network,
         gpu,
         toolchains,
+        env,
     }))
 }
 
@@ -443,13 +483,15 @@ impl Config {
         Ok(Some(path))
     }
 
-    /// Turn config entries into mounts (+ symlinks to recreate). Missing paths hard-fail
-    /// unless `optional`, matching CLI `--ro`/`--rw`.
+    /// Turn config entries into mounts (+ symlinks to recreate) and the `[env]` pairs.
+    /// Missing paths hard-fail unless `optional`, matching CLI `--ro`/`--rw`.
     pub fn resolve(&self) -> Result<Resolved> {
         // `None`: the global config has no directory a relative path could sensibly mean,
         // so it keeps its long-standing behaviour of leaving one to the OS. Project files
         // pass their own directory — see `resolve_specs`.
-        resolve_specs(&self.mounts, &self.toolchains, None)
+        let mut r = resolve_specs(&self.mounts, &self.toolchains, None)?;
+        r.env = env_pairs(&self.env);
+        Ok(r)
     }
 }
 
@@ -537,7 +579,10 @@ pub(crate) fn resolve_specs(
     }
 
     resolve_toolchains(toolchains, &mut mounts)?;
-    Ok(Resolved { mounts, symlinks })
+    // `[env]` is not resolved here: it needs no filesystem and no `base`, so each caller
+    // attaches its own rather than threading a third map through a function whose whole
+    // subject is paths.
+    Ok(Resolved { mounts, symlinks, env: Vec::new() })
 }
 
 /// Append the mounts for every enabled toolchain. Same tier as `[mounts]`, so it rides
@@ -724,6 +769,41 @@ mod tests {
         }
         let err = res.expect_err("missing non-optional toolchain must fail");
         assert!(err.to_string().contains("not installed"), "got: {err}");
+    }
+
+    /// Plain key/value, and name-as-key so a variable cannot be listed twice. `resolve`
+    /// carries it through unchanged — no `~`, no `$VAR`: what the file says is what the
+    /// sandbox gets.
+    #[test]
+    fn env_is_verbatim_key_value() {
+        let c = parse_str("[env]\nRUST_LOG = \"debug\"\nARCESSE_URL = \"http://10.0.0.1/\"\n");
+        assert_eq!(
+            c.resolve().unwrap().env,
+            vec![
+                ("ARCESSE_URL".to_string(), "http://10.0.0.1/".to_string()),
+                ("RUST_LOG".to_string(), "debug".to_string()),
+            ],
+            "name-ordered, so one layer's contribution is identical run to run"
+        );
+    }
+
+    /// A non-string value is a parse error rather than a coercion. `[env]` is deliberately
+    /// dumb — the sandbox environment is a map of strings, and quietly rendering `8080` as
+    /// `"8080"` would be the first step toward a value language.
+    #[test]
+    fn env_refuses_a_non_string_value() {
+        assert!(toml::from_str::<Config>("[env]\nPORT = 8080\n").is_err());
+    }
+
+    /// The drop-in merge, for `[env]`: whole-key last-wins like `[mounts]`, which the
+    /// name-as-key gets for free — no field-by-field `Option` dance, because unlike
+    /// `[forward]` there is no shared struct for one file to clobber another's keys in.
+    #[test]
+    fn env_merges_per_key_across_files() {
+        let mut merged = parse_str("[env]\nA = \"1\"\nB = \"2\"\n").env;
+        merged.extend(parse_str("[env]\nA = \"overridden\"\n").env);
+        assert_eq!(merged["A"], "overridden", "config.toml wins over the drop-in");
+        assert_eq!(merged["B"], "2", "an untouched key survives");
     }
 
     /// The drop-in merge: `config.toml` is applied last and wins, but only on the keys it

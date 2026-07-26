@@ -218,6 +218,41 @@ you. `hide` is a bridge, not a guarantee of completeness — the real fix is not
 `~/.config` wholesale in the first place. It does not change the standing rule that
 credentials should reach the sandbox as *oracles* (agent sockets), never as key material.
 
+**Environment:** the sandbox's environment starts nearly empty. limes sets `HOME`,
+`LIMES_VERSION`, `XDG_RUNTIME_DIR` and whatever the forwards need; nothing is inherited from
+the shell you ran `lim` in. An `[env]` table is how anything else gets there:
+
+```toml
+[env]
+RUST_LOG    = "debug"
+ARCESSE_URL = "http://192.0.2.10/"
+```
+
+**Plain key/value, and that is the whole feature.** The value is taken verbatim — no `~`, no
+`$VAR` — and there is deliberately no form that reads the host's own environment. Every
+credential limes forwards is an *oracle* (an agent socket, a broker), never key material, and
+a `{ host = true }` spelling would be the first mechanism to hand a sandbox a secret it can
+read and copy. `-e NAME` still passes the host's value through for a single run, which is the
+right place for that decision: typed, once, in the open. (`-e NAME` whose variable is unset is
+an error naming it, rather than the silent drop Docker would do.)
+
+`HOME` and `LIMES_VERSION` are refused. limes computes against both — the mount table's
+fabricated-directory scan and the generated `/etc/passwd` are keyed off `$HOME`, and
+`LIMES_VERSION` is the marker scripts detect the sandbox with — so a different value is a
+broken sandbox, not a configured one.
+
+Precedence is the usual chain, with the forwards below you and the CLI above:
+
+```text
+built-ins → forwards → config.toml/config.d → .limes.local.toml → -e
+```
+
+Unlike mounts, the environment is **part of the joining policy**. `docker run` bakes it into
+the container, so a second `lim` in the same workspace cannot apply a different `[env]` or
+`-e` — it would silently get the first one's. Instead it refuses and prints the difference,
+the same way a mismatched mount does. Only the working directory stays exempt (`docker exec`
+carries its own), which is what lets `cd src && lim` land where you are.
+
 **Data-root:** the daemon keeps its images and layers in `~/.local/share/limes/docker`.
 It stacks an overlay over that path, so it has to sit on a filesystem the kernel accepts as
 an overlayfs `upperdir` — and an encrypted home (ecryptfs, as offered by several distro

@@ -11,11 +11,16 @@
 //! `--name`, which quietly disables joining altogether.
 //!
 //! Forwards need no special handling — their sockets *are* mounts, so they appear here like
-//! anything else. Env and cwd are deliberately exempt: `docker exec` takes its own `-e` and
-//! `-w`, so they are per-shell, and that is what lets a join from a subdirectory land where
-//! you actually are.
+//! anything else. The environment is compared too: it is baked into the container by
+//! `docker run`, so a second `lim` carrying different `[env]` or `-e` cannot apply it — and
+//! silently dropping it is the same wrong-shell-without-a-sign this module exists to stop.
+//!
+//! Only the *working directory* is exempt, because `docker exec` takes its own `-w`. That is
+//! what lets a join from a subdirectory land where you actually are. `TERM`/`COLORTERM` are
+//! exempt by construction rather than by rule: they describe a shell's terminal, not the
+//! sandbox, so they are never in the spec (see `run::term_env`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
@@ -48,6 +53,10 @@ struct InspectMount {
 struct InspectConfig {
     #[serde(rename = "Hostname")]
     hostname: String,
+    /// Everything `-e` set *plus* the image's own `ENV` — see `requested_env` for why the
+    /// requested side has to account for the latter before the two can be compared.
+    #[serde(rename = "Env", default)]
+    env: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +129,15 @@ pub fn diff(spec: &RunSpec, running: &Inspect) -> Vec<Diff> {
         });
     }
 
+    // The environment, rendered as the flags you would type — same treatment as mounts, and
+    // in both directions: a variable only the running sandbox has is a shell configured by
+    // someone else's config, and one only requested would be silently dropped on the way in.
+    let want: BTreeSet<String> =
+        requested_env(spec).into_iter().map(|e| format!("-e {e}")).collect();
+    let have: BTreeSet<String> = running.config.env.iter().map(|e| format!("-e {e}")).collect();
+    out.extend(have.difference(&want).cloned().map(Diff::OnlyRunning));
+    out.extend(want.difference(&have).cloned().map(Diff::OnlyRequested));
+
     // Devices are set-compared like mounts: a GPU passed to one and not the other is exactly
     // the kind of silent difference a join must refuse.
     let want_dev: BTreeSet<String> = spec.devices.iter().map(|d| format!("--device {d}")).collect();
@@ -145,6 +163,22 @@ pub fn diff(spec: &RunSpec, running: &Inspect) -> Vec<Diff> {
     out.extend(have.difference(&want).cloned().map(Diff::OnlyRunning));
     out.extend(want.difference(&have).cloned().map(Diff::OnlyRequested));
     out
+}
+
+/// The environment the running container *would* have, given this spec.
+///
+/// `docker inspect` reports the image's own `ENV` in `Config.Env` alongside everything `-e`
+/// added, so the spec alone is never the whole picture — comparing it directly would report
+/// the image's `PATH` as a variable only the running sandbox has, on every single join.
+/// `context::IMAGE_ENV` is that baseline, and it is *underneath* the spec: a `-e PATH=…`
+/// replaces the image's entry rather than adding a second one, which is what Docker does.
+fn requested_env(spec: &RunSpec) -> Vec<String> {
+    let mut merged: BTreeMap<&str, &str> = BTreeMap::new();
+    for e in crate::context::IMAGE_ENV.iter().copied().chain(spec.env.iter().map(String::as_str)) {
+        let (name, value) = e.split_once('=').unwrap_or((e, ""));
+        merged.insert(name, value);
+    }
+    merged.into_iter().map(|(n, v)| format!("{n}={v}")).collect()
 }
 
 fn render_spec_mount(m: &MountArg) -> String {
@@ -198,18 +232,20 @@ mod tests {
     use std::path::PathBuf;
 
     /// A fixture in the shape `docker inspect` actually returns — array-wrapped, `RW`
-    /// rather than `Mode`, tmpfs as a map. Verified against Docker 29.6.2.
+    /// rather than `Mode`, tmpfs as a map, and `Config.Env` carrying the image's own `ENV`
+    /// as well as what `-e` set. Verified against Docker 29.6.2.
     fn fixture() -> Inspect {
-        parse(
-            r#"[{
+        parse(&format!(
+            r#"[{{
               "Mounts": [
-                {"Type":"bind","Source":"/usr","Destination":"/usr","Mode":"ro","RW":false},
-                {"Type":"bind","Source":"/w","Destination":"/w","Mode":"","RW":true}
+                {{"Type":"bind","Source":"/usr","Destination":"/usr","Mode":"ro","RW":false}},
+                {{"Type":"bind","Source":"/w","Destination":"/w","Mode":"","RW":true}}
               ],
-              "Config": {"Hostname": "krzaq"},
-              "HostConfig": {"Tmpfs": {"/tmp": "exec"}}
-            }]"#,
-        )
+              "Config": {{"Hostname": "krzaq", "Env": ["{image}", "HOME=/home/u"]}},
+              "HostConfig": {{"Tmpfs": {{"/tmp": "exec"}}}}
+            }}]"#,
+            image = crate::context::IMAGE_ENV[0]
+        ))
         .expect("fixture parses")
     }
 
@@ -219,7 +255,7 @@ mod tests {
             hostname: hostname.into(),
             workspace: PathBuf::from("/w"),
             mounts,
-            env: vec!["IGNORED=1".into()],
+            env: vec!["HOME=/home/u".into()],
             labels: vec![],
             symlinks: vec![],
             host_network: false,
@@ -242,15 +278,51 @@ mod tests {
         assert_eq!(diff(&spec(matching(), "krzaq"), &fixture()), vec![]);
     }
 
-    /// Env is per-shell — `docker exec` carries its own — so it must never block a join.
-    /// Neither must the working directory, which is what lets a join from a subdirectory
-    /// land where you actually are.
+    /// The working directory is per-shell — `docker exec` carries its own `-w` — so it must
+    /// never block a join. That is what lets a join from a subdirectory land where you are.
     #[test]
-    fn env_and_cwd_are_exempt() {
+    fn cwd_is_exempt() {
         let mut s = spec(matching(), "krzaq");
-        s.env = vec!["TOTALLY=different".into()];
         s.workspace = PathBuf::from("/w/deep/subdir");
         assert_eq!(diff(&s, &fixture()), vec![]);
+    }
+
+    /// The environment is *not* exempt. `docker run` bakes it into the container, so a second
+    /// `lim` whose `[env]` or `-e` differs cannot apply it — and applying it silently only
+    /// halfway is worse than refusing. Both directions are reported.
+    #[test]
+    fn a_differing_env_is_reported() {
+        let mut s = spec(matching(), "krzaq");
+        s.env = vec!["HOME=/home/u".into(), "RUST_LOG=debug".into()];
+        assert_eq!(diff(&s, &fixture()), vec![Diff::OnlyRequested("-e RUST_LOG=debug".into())]);
+
+        let mut s = spec(matching(), "krzaq");
+        s.env = vec![];
+        assert_eq!(diff(&s, &fixture()), vec![Diff::OnlyRunning("-e HOME=/home/u".into())]);
+    }
+
+    /// The image sets its own `PATH`, and `docker inspect` reports it in the same list as
+    /// everything `-e` added. Without `IMAGE_ENV` on the requested side that variable is one
+    /// only the running sandbox has — so *every* join would refuse, on the first try, over a
+    /// difference nobody created.
+    #[test]
+    fn the_images_own_env_is_not_a_difference() {
+        assert_eq!(diff(&spec(matching(), "krzaq"), &fixture()), vec![]);
+    }
+
+    /// …but it is a baseline, not a floor: a spec that sets `PATH` replaces the image's entry
+    /// rather than colliding with it, which is what Docker itself does.
+    #[test]
+    fn a_spec_env_overrides_the_image_baseline() {
+        let mut s = spec(matching(), "krzaq");
+        s.env.push("PATH=/only/mine".into());
+        assert_eq!(
+            diff(&s, &fixture()),
+            vec![
+                Diff::OnlyRunning(format!("-e {}", crate::context::IMAGE_ENV[0])),
+                Diff::OnlyRequested("-e PATH=/only/mine".into()),
+            ]
+        );
     }
 
     /// Asking for *less* than the sandbox has still refuses: joining would hand out access

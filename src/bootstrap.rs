@@ -264,3 +264,29 @@ fn wait_for_socket(ctx: &Context) -> bool {
 fn indent(s: &str) -> String {
     s.lines().map(|l| format!("    {l}\n")).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `context::IMAGE_ENV` restates what the image's `ENV` lines set, because `policy`
+    /// compares the sandbox environment exactly and has to know which variables came from
+    /// the image rather than from `-e`. The two can only be trusted to agree if something
+    /// checks — this is that something. An `ENV` added to the Dockerfile without a matching
+    /// entry here would otherwise surface as every join refusing over a variable nobody set.
+    #[test]
+    fn image_env_matches_the_dockerfile() {
+        for e in crate::context::IMAGE_ENV {
+            assert!(
+                DOCKERFILE.lines().any(|l| l.trim() == format!("ENV {e}")),
+                "image/Dockerfile has no `ENV {e}` — context::IMAGE_ENV has gone stale"
+            );
+        }
+        let declared = DOCKERFILE.lines().filter(|l| l.trim_start().starts_with("ENV ")).count();
+        assert_eq!(
+            declared,
+            crate::context::IMAGE_ENV.len(),
+            "the Dockerfile declares an ENV that context::IMAGE_ENV does not list"
+        );
+    }
+}

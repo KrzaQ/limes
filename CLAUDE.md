@@ -133,6 +133,23 @@ beats `--ro` for the same path in a single run. `--hide` is last because it is t
 direction. Order of the pushes *is* the policy — changing it changes user-visible
 precedence.
 
+**`resolve_env` is the same chain for the environment**, and only that chain is shared:
+
+```
+HOME/LIMES_VERSION/XDG_RUNTIME_DIR  →  GIT_CONFIG_SYSTEM  →  forwards  →  config.toml/config.d  →  .limes.local.toml  →  -e
+```
+
+`dedupe_env` then collapses duplicate names last-wins, mirroring `dedupe`. Canonicalising
+here rather than leaving it to Docker is load-bearing now that `policy` compares the
+environment exactly. Env has no nesting to sort and no default-mirror to carve holes in — the
+sandbox environment starts nearly *empty*, so the language is additive and there is no
+`hide` direction to design. `[env]` is deliberately plain key/value: no expansion, and no
+form that reads the host's environment, which would be the first mechanism to hand a sandbox
+key material rather than an oracle. `RESERVED_ENV` (`HOME`, `LIMES_VERSION`) is refused
+because limes computes against both elsewhere. **The check lives in `run.rs`, not in
+`config.rs`** — that is where the layers meet, and a copy in either config module would
+leave the other free to set `HOME`.
+
 A `Mount` is **not** a bind mount: it is a policy for one path *inside* the sandbox, which
 each backend renders its own way (`-v`, `--tmpfs`, or an SBPL rule). `Kind` must stay
 `Copy + Eq` so `Mount` stays `PartialEq` — `dedupe` copies the whole kind, and copying any
@@ -166,10 +183,15 @@ is what makes on-by-default safe.
 Docker layers, which is why depth-sorting matters.
 
 **`config.rs`** parses `~/.config/limes/config.toml` plus `config.d/*.toml` drop-ins
-(filename-sorted drop-ins first, `config.toml` last so it wins). It carries two tables:
-`[mounts]`, where path-as-TOML-key gives uniqueness for free, and `[forward]`, whose
-fields are `Option<bool>` precisely so drop-ins merge field-by-field — `None` means "this
-file said nothing", which is what stops one file from clobbering another's unrelated keys. `link = "parent"` exists because Docker flattens a symlink when it
+(filename-sorted drop-ins first, `config.toml` last so it wins). Its tables split by how
+they merge: `[mounts]` and `[env]` are keyed maps, where path- or name-as-TOML-key gives
+uniqueness and whole-key last-wins for free; `[forward]`'s fields are `Option<bool>`
+precisely so drop-ins merge field-by-field — `None` means "this file said nothing", which is
+what stops one file from clobbering another's unrelated keys. `[env]` values are `String`,
+so a non-string is a parse error rather than a coercion, and the map is a `BTreeMap` so a
+layer's contribution is name-ordered and identical run to run — which matters because the
+environment is part of the join policy, and a diff that depended on TOML map ordering would
+come and go. `link = "parent"` exists because Docker flattens a symlink when it
 mounts it: instead limes mounts the target's *parent directory* and emits a `SymlinkSpec`,
 which `run.rs` turns into an `sh -c 'ln -sfn …; exec "$@"'` prelude that recreates the
 symlink in the tmpfs `$HOME` before exec'ing the real command. This is what makes
@@ -235,10 +257,21 @@ resolved `RunSpec` is compared against `docker inspect` — *not* against a fing
 label, which would be a second copy of the truth able to go stale. Deriving from the daemon
 also means the human-readable diff falls out for free, and printing it is not optional: a
 bare "policy mismatch, refusing" is the kind of error people route around by always passing
-`--name`, which disables joining entirely. Any difference refuses; env and cwd are exempt
-because `docker exec` carries its own `-e`/`-w` and they are per-shell. This is why
+`--name`, which disables joining entirely. Any difference refuses. This is why
 `RunSpec` must hold *everything* docker is told — a piece that emitted its own args on the
 side would be invisible here, and silently stay invisible.
+
+**Only cwd is exempt**, because `docker exec` carries its own `-w`. The *environment* is
+compared: `docker run` bakes it into the container, so a second `lim` carrying a different
+`[env]` or `-e` cannot apply it, and dropping it silently is the failure this module exists
+to stop. Two consequences. Everything reaching `RunSpec.env` must be a full `NAME=VALUE` —
+Docker's bare `-e NAME` form resolves on the way in, so it would never reach the spec and
+would read as a difference on every join (`run::cli_env` resolves the CLI form for exactly
+this reason; `forward.rs` spells its entries out for the same one). And the requested side
+must add `context::IMAGE_ENV`, the image's own `ENV`, which `docker inspect` reports in the
+same list — without it the image's `PATH` is a variable only the running sandbox has, and
+*every* join refuses on the first try. That constant restates the Dockerfile, which is only
+safe because `bootstrap`'s `image_env_matches_the_dockerfile` pins the two together.
 
 **Discovery is the name, not a label scan.** `derive_name` is a total function of the
 workspace path, so `docker inspect <name>` either hits or it does not. Sandboxes are still

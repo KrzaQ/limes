@@ -49,7 +49,7 @@ fn assemble_mounts(
     local: config::Resolved,
     workspace: &Path,
     extra: Vec<Mount>,
-) -> Result<(Vec<Mount>, Vec<config::SymlinkSpec>)> {
+) -> Result<config::Resolved> {
     let mut mounts = default_mounts(ctx);
     mounts.extend(extra);
     // Workspace is read-write by default.
@@ -58,16 +58,23 @@ fn assemble_mounts(
     // conveniences above, but still lose to the explicit CLI flags below). `link`
     // entries additionally produce symlinks to recreate inside the sandbox.
     let mut symlinks: Vec<config::SymlinkSpec> = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
     if let Some(cfg) = cfg {
         let resolved = cfg.resolve()?;
         mounts.extend(resolved.mounts);
         symlinks = resolved.symlinks;
+        env = resolved.env;
     }
     // Approved `.limes.local.toml` files, already ordered shallowest-first by `local::load`
     // so a per-repo file beats the shared one above it. More specific than the machine's
     // config, less so than a flag typed for this run.
     mounts.extend(local.mounts);
     symlinks.extend(local.symlinks);
+    // Same tier order for `[env]` as for `[mounts]` — and it is only *this* order that the
+    // two share. Env has no nesting to sort and no exact-path collisions to resolve, so it
+    // leaves here as a plain list; `resolve_env` collapses it against the layers this
+    // function never sees (the built-ins, the forwards, the CLI).
+    env.extend(local.env);
     // User-supplied holes (canonicalized; must exist on host). `--rw` after `--ro`
     // so a path given both ways ends up writable, and `--hide` after both: it is the
     // safety direction, so `--rw X --hide X` hides.
@@ -87,7 +94,7 @@ fn assemble_mounts(
     guard_trust_store(&mounts, &ctx.trust_dir())?;
     dedupe(&mut mounts);
     mounts::sort_for_nesting(&mut mounts);
-    Ok((mounts, symlinks))
+    Ok(config::Resolved { mounts, symlinks, env })
 }
 
 /// The project files' contribution, or nothing when `--no-local` says so.
@@ -96,7 +103,7 @@ fn assemble_mounts(
 /// reach one path without, and a second copy is how one of them ends up not calling it.
 fn local_mounts(ctx: &Context, args: &RunArgs, workspace: &Path) -> Result<config::Resolved> {
     if args.no_local {
-        return Ok(config::Resolved { mounts: Vec::new(), symlinks: Vec::new() });
+        return Ok(config::Resolved::empty());
     }
     local::load(&ctx.trust_dir(), &ctx.home, workspace)
 }
@@ -132,6 +139,137 @@ fn guard_trust_store(mounts: &[Mount], trust_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Variables limes sets itself and then relies on, which no config or flag may restate.
+///
+/// Not a taste rule. `HOME` is *computed against* in two other places — `mounts::invented_dirs`
+/// keys the fabricated-directory scan off `ctx.home`, and `identity::passwd` bakes it into the
+/// `/etc/passwd` that makes uid 0 present as the user — so overriding it here does not produce
+/// a differently-configured sandbox, it produces an inconsistent one, with a `$HOME` the mount
+/// table knows nothing about. `LIMES_VERSION` is the marker scripts detect the sandbox with
+/// (`[[ -n $LIMES_VERSION ]]`); a forgeable one is worse than none.
+///
+/// `XDG_RUNTIME_DIR` is deliberately *not* here. It names a directory that is mounted, so a
+/// wrong value is caught by the mount table rather than by a rule, and pointing it elsewhere
+/// is a thing someone may legitimately want.
+const RESERVED_ENV: &[&str] = &["HOME", "LIMES_VERSION"];
+
+/// The name half of a `NAME=VALUE` entry (or the whole thing, for the bare `-e NAME` form).
+fn env_name(entry: &str) -> &str {
+    entry.split_once('=').map_or(entry, |(n, _)| n)
+}
+
+/// Collapse duplicate names, last wins, keeping the first occurrence's position.
+///
+/// The same shape as `dedupe` for mounts, and for the same reason: the layers are pushed
+/// least-to-most explicit, so "last wins" *is* the precedence rule. Position is kept from
+/// the first occurrence purely so `--dry-run` reads in tier order.
+///
+/// Canonicalising here rather than leaving it to Docker is load-bearing now that `policy`
+/// compares the environment exactly — a spec holding two entries for one name would be
+/// compared against whichever single one the daemon chose to record.
+fn dedupe_env(env: &mut Vec<String>) {
+    let mut out: Vec<String> = Vec::new();
+    for e in env.drain(..) {
+        match out.iter_mut().find(|x| env_name(x) == env_name(&e)) {
+            Some(existing) => *existing = e,
+            None => out.push(e),
+        }
+    }
+    *env = out;
+}
+
+/// Normalise one `-e` argument to `NAME=VALUE`.
+///
+/// The bare `-e NAME` form means "whatever the host has", and it is resolved *here* rather
+/// than handed to Docker to look up. Two reasons: the spec has to hold what docker is
+/// actually told, or `policy` compares a `NAME` against the daemon's `NAME=value` and refuses
+/// every join; and Docker drops a bare name whose variable is unset without a word, which is
+/// the silent-wrong-answer this codebase spends its error messages avoiding. A missing one is
+/// a hard error instead, the same way a mount path that does not exist is.
+fn cli_env(raw: &str) -> Result<String> {
+    if let Some((name, _)) = raw.split_once('=') {
+        if name.is_empty() {
+            bail!("`-e {raw}`: an environment variable name cannot be empty");
+        }
+        return Ok(raw.to_string());
+    }
+    let value = std::env::var(raw).map_err(|_| {
+        anyhow::anyhow!(
+            "`-e {raw}` passes the host's `{raw}` through, but it is not set — \
+             write `-e {raw}=<value>` to give one"
+        )
+    })?;
+    Ok(format!("{raw}={value}"))
+}
+
+/// The sandbox's environment, assembled least-to-most explicit:
+///
+/// ```text
+/// built-ins → system gitconfig → forwards → config.toml/config.d → .limes.local.toml → -e
+/// ```
+///
+/// Config sits on the same side of the forwards as the CLI does, because it is the user
+/// speaking too — just less specifically. `dedupe_env` then applies last-wins across the lot.
+///
+/// **This is where the layers meet, and so it is where they are checked.** `config.rs` and
+/// `local.rs` each hand over a plain map and validate nothing; putting `RESERVED_ENV` in
+/// either would leave the other free to set `HOME`, and a duplicated rule is one that drifts.
+#[cfg(target_os = "linux")]
+fn resolve_env(
+    ctx: &Context,
+    args: &RunArgs,
+    system_gitconfig: bool,
+    forwarded: Vec<String>,
+    configured: Vec<(String, String)>,
+) -> Result<Vec<String>> {
+    let mut env = vec![
+        format!("HOME={}", ctx.home.display()),
+        // Marker so shells/scripts/tooling inside can tell they're in a limes sandbox:
+        // presence means "inside limes", value is the version. It's the crate version, so
+        // it never drifts from Cargo.toml / `lim --version`.
+        concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION")).to_string(),
+        // Mirrored from the host rather than translated to the container's uid 0: every
+        // other path limes mirrors is identical inside and out, and a literal
+        // `/run/user/1000` in a script or unit file has to keep meaning what it means on
+        // the host. gnupg is unaffected either way -- it keys off `/run/user/<uid>`
+        // existing, not off this variable.
+        format!("XDG_RUNTIME_DIR={}", ctx.xdg_runtime_dir.display()),
+    ];
+    // Point git's *system* config tier at the file mounted above. Nothing else supplies one
+    // inside — `/etc/gitconfig` is not among the `/etc` handful `default_mounts` mirrors —
+    // so this suppresses nothing that was reachable anyway.
+    if system_gitconfig {
+        env.push(format!("GIT_CONFIG_SYSTEM={}", ctx.gitconfig_file().display()));
+    }
+    // Forward env before the user's, so an explicit `-e` still wins over what a forward sets.
+    env.extend(forwarded);
+
+    for (name, value) in configured {
+        reserved(&name, "config")?;
+        env.push(format!("{name}={value}"));
+    }
+    for raw in &args.env {
+        let entry = cli_env(raw)?;
+        reserved(env_name(&entry), "`-e`")?;
+        env.push(entry);
+    }
+
+    dedupe_env(&mut env);
+    Ok(env)
+}
+
+/// Refuse a reserved name, naming where it came from and why it is refused.
+#[cfg(target_os = "linux")]
+fn reserved(name: &str, source: &str) -> Result<()> {
+    if RESERVED_ENV.contains(&name) {
+        bail!(
+            "{source} sets `{name}`, which limes sets itself and depends on elsewhere — \
+             a sandbox with a different one is broken, not differently configured"
+        );
+    }
+    Ok(())
+}
+
 /// Everything docker will be told about this sandbox, in one value.
 ///
 /// Assembled up front rather than pushed onto a `Command` as each piece is computed,
@@ -152,6 +290,8 @@ pub struct RunSpec {
     /// tmpfs, the forwarded sockets, then the deduped depth-sorted table. Relative order
     /// within this list is load-bearing — it is what layers a `hide` over its parent.
     pub mounts: Vec<MountArg>,
+    /// `NAME=VALUE`, deduped last-wins in tier order — see `resolve_env`. Canonical rather
+    /// than merely appended, because `policy` compares it exactly against `docker inspect`.
     pub env: Vec<String>,
     pub labels: Vec<String>,
     pub symlinks: Vec<config::SymlinkSpec>,
@@ -228,7 +368,9 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
         Vec::new()
     };
 
-    let (table, mut symlinks) = assemble_mounts(ctx, args, &cfg, local, &workspace, extra)?;
+    let assembled = assemble_mounts(ctx, args, &cfg, local, &workspace, extra)?;
+    let table = assembled.mounts;
+    let mut symlinks = assembled.symlinks;
     // An agent's launcher symlink is recreated the same way config's `link = "parent"`
     // entries are — one prelude, one mechanism.
     symlinks.extend(detected.symlinks);
@@ -306,28 +448,7 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     // nesting order. Docker sorts destinations itself, so this is for the reader.
     mounts.splice(scaffolding..scaffolding, invented);
 
-    let mut env = vec![
-        format!("HOME={}", ctx.home.display()),
-        // Marker so shells/scripts/tooling inside can tell they're in a limes sandbox:
-        // presence means "inside limes", value is the version. It's the crate version, so
-        // it never drifts from Cargo.toml / `lim --version`.
-        concat!("LIMES_VERSION=", env!("CARGO_PKG_VERSION")).to_string(),
-        // Mirrored from the host rather than translated to the container's uid 0: every
-        // other path limes mirrors is identical inside and out, and a literal
-        // `/run/user/1000` in a script or unit file has to keep meaning what it means on
-        // the host. gnupg is unaffected either way -- it keys off `/run/user/<uid>`
-        // existing, not off this variable.
-        format!("XDG_RUNTIME_DIR={}", ctx.xdg_runtime_dir.display()),
-    ];
-    // Point git's *system* config tier at the file mounted above. Nothing else supplies one
-    // inside — `/etc/gitconfig` is not among the `/etc` handful `default_mounts` mirrors —
-    // so this suppresses nothing that was reachable anyway.
-    if system_gitconfig {
-        env.push(format!("GIT_CONFIG_SYSTEM={}", ctx.gitconfig_file().display()));
-    }
-    // Forward env before the user's, so an explicit `-e` still wins over what a forward sets.
-    env.extend(pieces.env);
-    env.extend(args.env.iter().cloned());
+    let env = resolve_env(ctx, args, system_gitconfig, pieces.env, assembled.env)?;
 
     // Mirror the host's hostname. Without this the sandbox reports the container ID, which
     // changes every run and reads as noise. CLI beats config, as everywhere else.
@@ -560,8 +681,12 @@ pub fn run(ctx: &Context, args: &RunArgs) -> Result<()> {
     // Agents still matter, but only for their *state* dirs: the program files are already
     // on the host and readable, while `~/.claude` must be writable under the base deny.
     let detected = agents::detect(ctx, args);
-    let (mounts, _symlinks) =
-        assemble_mounts(ctx, args, &cfg, local, &workspace, detected.mounts.clone())?;
+    // `.env` is ignored here: `sandbox-exec` replaces this process, so the sandbox inherits
+    // the host environment whole and there is no allowlist for `[env]` to add to. Giving it
+    // the Linux meaning would mean filtering the inherited environment down to the declared
+    // set — a real behaviour change for the experimental backend, not a wiring detail.
+    let assembled = assemble_mounts(ctx, args, &cfg, local, &workspace, detected.mounts.clone())?;
+    let mounts = assembled.mounts;
 
     // Seatbelt matches resolved paths, so the temp dir must be canonical
     // (`/private/var/folders/…`); `canonicalize` is realpath.
@@ -846,6 +971,65 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The env chain's precedence rule, in the same shape the mount one has: the layers are
+    /// pushed least-to-most explicit, so a later entry for a name simply replaces the earlier.
+    /// This is how a `-e` beats `[env]`, and how `[env]` beats what a forward set.
+    #[test]
+    fn dedupe_env_is_last_wins_in_tier_order() {
+        let mut e = vec![
+            "SSH_AUTH_SOCK=/forwarded".to_string(),
+            "RUST_LOG=info".to_string(),
+            "SSH_AUTH_SOCK=/mine".to_string(),
+        ];
+        dedupe_env(&mut e);
+        assert_eq!(
+            e,
+            vec!["SSH_AUTH_SOCK=/mine".to_string(), "RUST_LOG=info".to_string()],
+            "the later value wins, at the earlier one's position"
+        );
+    }
+
+    /// A value may contain `=`; only the first one separates. Splitting on all of them would
+    /// make `FOO=a=b` and `FOO=a=c` look like different variables and both survive dedupe.
+    #[test]
+    fn env_name_splits_on_the_first_equals_only() {
+        assert_eq!(env_name("GIT_SSH_COMMAND=ssh -o X=y"), "GIT_SSH_COMMAND");
+        let mut e = vec!["A=x=1".to_string(), "A=x=2".to_string()];
+        dedupe_env(&mut e);
+        assert_eq!(e, vec!["A=x=2".to_string()]);
+    }
+
+    /// `-e NAME` means "whatever the host has", and limes resolves it rather than letting
+    /// Docker do the lookup — the spec has to hold what docker is actually told, or `policy`
+    /// compares a bare `NAME` against the daemon's `NAME=value` and refuses every join.
+    #[test]
+    fn a_bare_cli_env_is_resolved_from_the_host() {
+        // SAFETY: single-threaded test; the name is this test's own.
+        unsafe { std::env::set_var("LIMES_TEST_BARE", "value") };
+        assert_eq!(cli_env("LIMES_TEST_BARE").unwrap(), "LIMES_TEST_BARE=value");
+        assert_eq!(cli_env("A=b").unwrap(), "A=b", "the explicit form passes through");
+    }
+
+    /// Docker drops a bare `-e` whose variable is unset without a word. That silence is the
+    /// failure worth avoiding: say so, and say what to write instead.
+    #[test]
+    fn a_bare_cli_env_that_is_unset_fails_loud() {
+        let err = cli_env("LIMES_TEST_DEFINITELY_UNSET").expect_err("an unset name must fail");
+        assert!(err.to_string().contains("not set"), "got: {err}");
+        assert!(err.to_string().contains("=<value>"), "must name a way out: {err}");
+    }
+
+    /// `HOME` is computed against by `mounts::invented_dirs` and `identity::passwd`, so a
+    /// config or flag that restates it produces an inconsistent sandbox rather than a
+    /// differently-configured one. Refuse, and say which side asked.
+    #[test]
+    fn reserved_names_are_refused_with_their_source() {
+        let err = reserved("HOME", "config").expect_err("HOME must be refused");
+        assert!(err.to_string().contains("config sets `HOME`"), "got: {err}");
+        assert!(reserved("LIMES_VERSION", "`-e`").is_err());
+        assert!(reserved("RUST_LOG", "config").is_ok(), "ordinary names are untouched");
+    }
 
     /// Last-wins on an exact path is what makes the whole precedence chain work — it is
     /// how a `--ro` beats a config mount, and how either beats the rosa/agent defaults.

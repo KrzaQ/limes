@@ -7,6 +7,17 @@ use anyhow::{Context as _, Result, bail};
 /// Image tag built by `lim build` and run by `lim run`.
 #[cfg(target_os = "linux")]
 pub const IMAGE_TAG: &str = "limes:local";
+/// The image's own `ENV`, which `docker inspect` reports in `Config.Env` alongside
+/// everything `-e` added.
+///
+/// It lives here because `policy` compares the sandbox's environment *exactly*, and without
+/// a baseline the running side would always carry a variable the requested side does not —
+/// refusing every join on the first try. Restating the Dockerfile's value is only safe
+/// because `bootstrap`'s `image_env_matches_the_dockerfile` pins the two together; a copy
+/// nothing checks is exactly the stale second truth `policy`'s docs warn about.
+#[cfg(target_os = "linux")]
+pub const IMAGE_ENV: &[&str] =
+    &["PATH=/limes/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/limes"];
 /// systemd user unit name for the dedicated rootless daemon.
 #[cfg(target_os = "linux")]
 pub const SERVICE: &str = "limes-docker.service";

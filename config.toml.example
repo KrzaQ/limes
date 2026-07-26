@@ -70,6 +70,27 @@
 # the passphrase is cached, anything in the sandbox can sign as you without being asked.
 # gpg_unrestricted = true
 
+# Variables to set inside the sandbox. The sandbox environment starts nearly empty -- limes
+# sets HOME, LIMES_VERSION, XDG_RUNTIME_DIR and whatever the forwards need, and nothing else
+# is inherited from the shell you ran `lim` in -- so this is how anything else gets there.
+#
+# Plain key/value, and that is the whole feature: the value is taken verbatim, with no `~`
+# and no $VAR expansion. There is deliberately no form that reads the host's own environment.
+# Everything limes forwards is an oracle (an agent socket, a broker), never key material, and
+# a `= { host = true }` would be the first thing to hand a sandbox a secret it can copy. If
+# you want one there anyway, `-e NAME` for a single run says so out loud.
+#
+# HOME and LIMES_VERSION are refused: limes sets them and computes against them elsewhere, so
+# a different one is a broken sandbox rather than a configured one.
+#
+# Same precedence as mounts -- CLI beats config -- and the environment is part of the joining
+# policy, so a second `lim` in the same workspace with a different [env] refuses rather than
+# silently getting the first one's. See `lim --dry-run`.
+# [env]
+# RUST_LOG         = "debug"
+# CARGO_TERM_COLOR = "always"
+# ARCESSE_URL      = "http://192.0.2.10/"
+
 # Host toolchains to mirror in. rbenv/rustup/uv keep their versions under $HOME, which the
 # sandbox shadows with a tmpfs -- so without this, `ruby` inside is the system copy (not your
 # rbenv-selected one) and `cargo`/`uv` are missing entirely. Nothing is mounted unless named

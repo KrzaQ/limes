@@ -159,7 +159,7 @@ pub fn load(store: &Path, home: &Path, workspace: &Path) -> Result<Resolved> {
         bail!(report);
     }
 
-    let mut out = Resolved { mounts: Vec::new(), symlinks: Vec::new() };
+    let mut out = Resolved::empty();
     for f in &found {
         // Name the file. `resolve_specs`' errors are phrased for the global config, where
         // there is only one file it could have meant; here there may be several, in
