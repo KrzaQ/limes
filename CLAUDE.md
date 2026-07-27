@@ -133,6 +133,12 @@ beats `--ro` for the same path in a single run. `--hide` is last because it is t
 direction. Order of the pushes *is* the policy — changing it changes user-visible
 precedence.
 
+The workspace rides that chain like anything else, so a `[mounts]` entry naming it takes it
+read-only — correct by the chain, and silent enough to read as a broken sandbox rather than
+as config. `workspace_downgrade` reports that after `dedupe` has settled, and only when no
+CLI flag named the path. Deliberately a warning and not a refusal: `lim --ro .` is a real
+thing to want, and the later layer is *supposed* to win.
+
 **`resolve_env` is the same chain for the environment**, and only that chain is shared:
 
 ```

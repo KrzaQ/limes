@@ -190,6 +190,14 @@ error, just like a bad `--ro`/`--rw` — unless `optional = true`, which skips i
 mounts override the built-in defaults but lose to CLI flags, so `--rw <path>` still wins for
 a single run, and `--no-config` ignores config entirely. See `config.toml.example`.
 
+The workspace is a built-in default, so it is covered by that rule too — and the one time
+that surprises people is when a config entry names the very directory you are working in. A
+drop-in mounting some repo `ro` (so its symlinks resolve inside every *other* sandbox) wins
+on the exact path the day that repo becomes the workspace, and the only symptom is `EROFS`
+from your editor. limes warns when the workspace ends up read-only or hidden and nobody
+asked for it on the command line; `--rw <workspace>` is the override. It stays a warning
+rather than a refusal, since a read-only workspace is a reasonable thing to want on purpose.
+
 **`link = "parent"`** is what any symlinked path needs. docker flattens a symlink when it
 mounts it, so a plain entry collapses source *and* destination onto the target and leaves
 nothing at the symlink's own path — a tool on `PATH` via a symlink (pipx's `~/.local/bin/*`,

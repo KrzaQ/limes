@@ -78,8 +78,14 @@ fn assemble_mounts(
     // User-supplied holes (canonicalized; must exist on host). `--rw` after `--ro`
     // so a path given both ways ends up writable, and `--hide` after both: it is the
     // safety direction, so `--rw X --hide X` hides.
+    //
+    // The paths named here are remembered for `workspace_downgrade`: typing one is a
+    // deliberate choice, and the warning is only for the silent kind.
+    let mut cli_named: Vec<PathBuf> = Vec::new();
     for p in &args.ro {
-        mounts.push(Mount::ro(mounts::canonicalize(p)?));
+        let p = mounts::canonicalize(p)?;
+        cli_named.push(p.clone());
+        mounts.push(Mount::ro(p));
     }
     for p in &args.rw {
         mounts.push(Mount::rw(mounts::canonicalize(p)?));
@@ -87,6 +93,7 @@ fn assemble_mounts(
     for p in &args.hide {
         // Missing is a no-op rather than an error — see `mounts::resolve_hide`.
         if let Some((p, mode)) = mounts::resolve_hide(p)? {
+            cli_named.push(p.clone());
             mounts.push(Mount::hide(p, mode));
         }
     }
@@ -94,7 +101,49 @@ fn assemble_mounts(
     guard_trust_store(&mounts, &ctx.trust_dir())?;
     dedupe(&mut mounts);
     mounts::sort_for_nesting(&mut mounts);
+    if let Some(what) = workspace_downgrade(&mounts, workspace, &cli_named) {
+        let w = workspace.display();
+        eprintln!("limes: warning: the workspace {w} is {what} inside the sandbox");
+        eprintln!(
+            "limes: a `[mounts]` entry (config.toml, config.d/*.toml or an approved \
+             .limes.local.toml) names it, and those layers beat the workspace's own \
+             read-write default — pass `--rw {w}` to override for this run"
+        );
+    }
     Ok(config::Resolved { mounts, symlinks, env })
+}
+
+/// Whether the resolved table has taken the workspace away from the caller, and how.
+///
+/// The workspace is the one tree limes exists to make writable, so a table handing it back
+/// read-only is nearly always an accident rather than a choice. The mechanism is the
+/// documented precedence chain working exactly as specified: `[mounts]` sits *after* the
+/// workspace, so a config entry naming the workspace path — a machine-wide drop-in that
+/// mounts some repo `ro`, say — collides on the exact path and wins by last-wins `dedupe`.
+/// Nothing else says so, and the symptom is an `EROFS` from an editor that names neither
+/// the config file nor the collision.
+///
+/// **Warn, never refuse.** A read-only workspace is a legitimate thing to want (inspecting
+/// a tree you would rather not touch), and the point of the precedence chain is that the
+/// later layer means what it says. This only reports that nobody typed it *this run*.
+///
+/// A path named on the CLI is therefore silent: `--ro .` is someone asking for precisely
+/// this outcome, and warning about what was just typed is the noise that teaches people to
+/// stop reading warnings. Nesting is silent too, and correctly — a `--ro` on some ancestor
+/// leaves the workspace its own deeper, writable mount, which is the feature.
+fn workspace_downgrade(
+    mounts: &[Mount],
+    workspace: &Path,
+    cli_named: &[PathBuf],
+) -> Option<&'static str> {
+    if cli_named.iter().any(|p| p == workspace) {
+        return None;
+    }
+    match mounts.iter().find(|m| m.path == workspace)?.kind {
+        mounts::Kind::Rw => None,
+        mounts::Kind::Ro => Some("read-only"),
+        mounts::Kind::Hide(_) => Some("hidden"),
+    }
 }
 
 /// The project files' contribution, or nothing when `--no-local` says so.
@@ -1077,6 +1126,42 @@ mod tests {
         let mut m = vec![Mount::hide("/a".into(), 0o700), Mount::ro("/a".into())];
         dedupe(&mut m);
         assert_eq!(m, vec![Mount::ro("/a".into())], "and is itself overridable");
+    }
+
+    /// The case this warning exists for, and the one that produced it: a machine-wide
+    /// drop-in mounts a repo `ro` so its symlinks resolve inside every *other* sandbox, and
+    /// then one day that repo is the workspace. `[mounts]` is a later tier, so it collides
+    /// on the exact path and wins — correct by the precedence chain, and completely silent.
+    #[test]
+    fn a_config_entry_over_the_workspace_is_reported() {
+        let ws = Path::new("/home/u/code/dotfiles");
+        let m = vec![Mount::ro(ws.into())];
+        assert_eq!(workspace_downgrade(&m, ws, &[]), Some("read-only"));
+
+        let m = vec![Mount::hide(ws.into(), 0o755)];
+        assert_eq!(workspace_downgrade(&m, ws, &[]), Some("hidden"), "hide is worse, not better");
+
+        let m = vec![Mount::rw(ws.into())];
+        assert_eq!(workspace_downgrade(&m, ws, &[]), None, "the default must stay quiet");
+    }
+
+    /// Typing `--ro .` is asking for exactly this, so it must not warn. A warning fired by
+    /// what the user just typed is the kind that teaches people to stop reading them.
+    #[test]
+    fn an_explicitly_named_workspace_is_not_reported() {
+        let ws = Path::new("/home/u/code/dotfiles");
+        let m = vec![Mount::ro(ws.into())];
+        assert_eq!(workspace_downgrade(&m, ws, &[ws.into()]), None);
+    }
+
+    /// Nesting is not a downgrade. `--ro ~/code` with the workspace beneath it leaves the
+    /// workspace its own deeper, writable mount — the headline feature, and it would be
+    /// absurd for it to warn.
+    #[test]
+    fn a_read_only_ancestor_is_not_a_downgrade() {
+        let ws = Path::new("/home/u/code/dotfiles");
+        let m = vec![Mount::ro("/home/u/code".into()), Mount::rw(ws.into())];
+        assert_eq!(workspace_downgrade(&m, ws, &[]), None);
     }
 
     /// The assertion `local.rs`'s whole gate rests on. Nothing mounts `~/.local` wholesale
