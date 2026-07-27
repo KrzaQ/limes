@@ -26,7 +26,7 @@
 # inside. This recreates the symlink and mounts the directory its target sits in:
 # "~/.local/bin/conan"    = { mode = "ro", link = "parent" }
 
-# Host toolchains to mirror in: rbenv, rust, uv, npm, nvm.
+# Host toolchains to mirror in: rbenv, rust, uv, npm, nvm, dlang.
 #
 # [toolchains]
 # uv = "ro"

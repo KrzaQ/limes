@@ -280,6 +280,7 @@ rust  = "ro"                          # host rustup toolchains + cargo, registry
 rbenv = { mode = "rw", optional = true }   # installs inside reach the host; skip if absent
 npm   = { mode = "ro", optional = true }   # ~/.npm cache (incl. npx) shared, so `npx` reuses it
 nvm   = { mode = "ro", optional = true }   # host's nvm node installs, if node comes from nvm
+dlang = { mode = "ro", optional = true }   # dmd/ldc config + dub's package and build cache
 ```
 
 Modes: `ro` (run the installed versions, can't add/remove them), `rw` (also `gem install` /
@@ -289,7 +290,8 @@ cache is a footgun (`uv` can't install even into a writable in-tree venv), not p
 host — is the intended endgame but not yet built; it parses and is refused for now. A
 toolchain named but not installed is a hard error unless marked `optional = true`, so "why is
 ruby the system one inside?" fails loudly at the config rather than silently. Recipes ship for
-`rbenv`, `rust` and `uv`; naming any other is an error until its recipe is added.
+`rbenv`, `rust`, `uv`, `npm`, `nvm` and `dlang`; naming any other is an error until its recipe
+is added.
 
 `rust` brings in `~/.rustup` and `~/.cargo/bin` (so `rustup show` inside reports the same
 toolchain as outside), the cargo config and the `cargo install` ledger, and — always
@@ -297,6 +299,17 @@ read-write, per the rule above — the `~/.cargo/registry` and `~/.cargo/git` ca
 which no build inside can so much as extract a crate. It mounts those paths individually
 rather than the cargo home as a whole, because `~/.cargo/credentials.toml` is your crates.io
 API token and credentials reach a sandbox as oracles or not at all.
+
+`dlang` is the one recipe whose missing piece is *not* under `$HOME`. The compilers arrive
+through the `/usr` mirror and are then inert: `dmd` reads exactly one config path and dies
+without it (``Error: `object` not found … config file: /etc/dmd.conf``), and `ldc2` fails the
+same way. So it also mounts `/etc/dmd.conf`, `/etc/ldc2.conf` and friends — **always
+read-only, whatever the mode**, since `rw` is about your own toolchain tree and should not
+extend to rewriting how the host itself compiles. The `$HOME` half is `~/.dub`, always
+read-write like any cache: it holds both the fetched package store and the build cache, and
+dub cannot resolve or build against a read-only one. Presence keys off `/etc/dmd.conf`, so a
+host whose D came from dlang.org's `install.sh` (everything under `~/dlang`, nothing in
+`/etc`) is skipped rather than detected — name the paths in `[mounts]` there.
 
 **Host network:** the sandbox is a container on limes' rootless daemon, and by default it
 joins the host network — which in rootless mode is rootlesskit's namespace, *not* the real

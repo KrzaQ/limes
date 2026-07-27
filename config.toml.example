@@ -102,17 +102,23 @@
 # "overlay" (ephemeral writable upper, host untouched) is planned, not yet built.
 #
 # A named-but-absent toolchain is a hard error -- mark it optional to skip on machines that
-# don't have it. Recipes exist for `rbenv`, `rust`, `uv`, `npm` and `nvm`.
+# don't have it. Recipes exist for `rbenv`, `rust`, `uv`, `npm`, `nvm` and `dlang`.
 #
 # `npm` shares ~/.npm (the package + npx cache, always rw) and ~/.npm-global; it is what lets
 # an `npx <server>` MCP inside reuse the host's download instead of refetching. `nvm` shares
 # ~/.nvm for hosts whose node comes from it rather than the distro.
+#
+# `dlang` is the odd one: the compilers come through the /usr mirror but are inert without
+# /etc/dmd.conf and /etc/ldc2.conf, so it mounts those too -- always ro, whatever the mode,
+# because "rw" means your own toolchain tree and not the host's compiler config. ~/.dub (the
+# package store and build cache) is the always-rw half.
 # [toolchains]
 # uv    = "ro"
 # rust  = "ro"
 # rbenv = { mode = "ro", optional = true }
 # npm   = { mode = "ro", optional = true }
 # nvm   = { mode = "ro", optional = true }
+# dlang = { mode = "ro", optional = true }
 
 # The sandbox joins the host network by default (rootlesskit's namespace in rootless mode,
 # not the real host), so docker-published ports are reachable from inside. Set false to use

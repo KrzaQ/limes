@@ -69,8 +69,8 @@ pub struct Config {
     /// built-in default: on when a GPU is present, a no-op when none is — see `gpu_devices`.
     #[serde(default)]
     gpu: Option<bool>,
-    /// Host toolchains to mirror in, keyed by name (`rbenv`, `rust`, `uv`, `npm`, `nvm`), each
-    /// with a mode.
+    /// Host toolchains to mirror in, keyed by name (`rbenv`, `rust`, `uv`, `npm`, `nvm`,
+    /// `dlang`), each with a mode.
     /// Empty unless a config asks: nothing is mounted by surprise. Merged across drop-ins
     /// like `[mounts]`, so a later file can restate a toolchain at a different mode.
     #[serde(default)]
@@ -179,6 +179,13 @@ struct Recipe {
     primary: &'static str,
     /// Mounted at the toolchain's chosen mode.
     install: &'static [&'static str],
+    /// Always mounted read-only, whatever the mode. These are the package's own files,
+    /// outside `$HOME` and identical on every box with that package — a toolchain has them
+    /// only because FHS put its config in `/etc` rather than in `/usr` with the binary.
+    /// `rw` is a statement about the *user's* toolchain tree (`gem install` reaching the
+    /// host); it must not silently widen into a sandbox that can rewrite how the host
+    /// itself compiles.
+    system: &'static [&'static str],
     /// Always mounted read-write: a read-only cache is a footgun (uv can't install even
     /// into a writable in-tree venv), not protection, and the versions dir is the thing the
     /// mode is actually guarding.
@@ -189,7 +196,7 @@ struct Recipe {
 /// the recipe is layout knowledge (where rbenv/rust/uv live), never a policy about enabling
 /// them — nothing mounts unless a config names it.
 const RECIPES: &[Recipe] = &[
-    Recipe { name: "rbenv", primary: "~/.rbenv", install: &["~/.rbenv"], cache: &[] },
+    Recipe { name: "rbenv", primary: "~/.rbenv", install: &["~/.rbenv"], system: &[], cache: &[] },
     // Presence keys off `~/.cargo`, not `~/.rustup`: a distro-packaged rust arrives through
     // the mirrored `/usr` and leaves only the caches under `$HOME`, and that host is still
     // one worth mirroring. `~/.rustup` is in `install`, so it comes along when it exists and
@@ -220,6 +227,7 @@ const RECIPES: &[Recipe] = &[
             "~/.cargo/.crates.toml",
             "~/.cargo/.crates2.json",
         ],
+        system: &[],
         // Cargo cannot build anything against a read-only registry — it extracts sources
         // into it — so this is the same "a ro cache is breakage, not protection" as uv's.
         cache: &["~/.cargo/registry", "~/.cargo/git"],
@@ -228,6 +236,7 @@ const RECIPES: &[Recipe] = &[
         name: "uv",
         primary: "~/.local/bin/uv",
         install: &["~/.local/bin/uv", "~/.local/share/uv"],
+        system: &[],
         cache: &["~/.cache/uv"],
     },
     // node's package cache and any global installs. node itself is usually the system one
@@ -238,11 +247,55 @@ const RECIPES: &[Recipe] = &[
     // rides the chosen mode. No auth token lives here -- npm keeps that in `~/.npmrc`, a file
     // this recipe never mounts -- but sharing `~/.npm` rw does let a sandbox write the host's
     // package cache, the same trust already extended to cargo's registry above.
-    Recipe { name: "npm", primary: "~/.npm", install: &["~/.npm-global"], cache: &["~/.npm"] },
+    Recipe {
+        name: "npm",
+        primary: "~/.npm",
+        install: &["~/.npm-global"],
+        system: &[],
+        cache: &["~/.npm"],
+    },
     // nvm's node installs, for a host that uses it rather than the distro's node. Keyed off
     // `~/.nvm`, so it simply skips where node is the system's (npm's cache still comes via the
     // `npm` recipe, which is independent of how node was installed).
-    Recipe { name: "nvm", primary: "~/.nvm", install: &["~/.nvm"], cache: &[] },
+    Recipe { name: "nvm", primary: "~/.nvm", install: &["~/.nvm"], system: &[], cache: &[] },
+    // D is the one recipe whose missing piece is *not* under `$HOME`. The compilers arrive
+    // through the `/usr` mirror and are then inert: `dmd` reads exactly one config path and
+    // dies without it (`Error: `object` not found ... config file: /etc/dmd.conf`), and
+    // `ldc2` warns then fails the same way. Those files are package data that FHS filed
+    // under `/etc` — byte-identical on every box with the package, and pointing only at
+    // `/usr`, which limes mirrors same-path, so they work verbatim inside. They sit in
+    // `system` rather than `install` so `rw` cannot make the host's compiler config
+    // writable from a sandbox. File or directory is not a distinction worth encoding:
+    // `/etc/ldc2.conf` is a plain file on some distros and a drop-in directory on Arch, and
+    // a `Mount` binds either. `/etc/ldc` and `/var/lib/dub` are the further paths ldc2 and
+    // dub search; all of them are skipped where absent.
+    //
+    // Presence keys off `/etc/dmd.conf` — the path the error message itself names, which
+    // makes a skip self-explaining. The known gap is a host with *only* ldc and no dmd:
+    // `Recipe` has one presence indicator and D has two disjoint install shapes (distro
+    // package, or dlang.org's install.sh under `~/dlang` with the config beside the
+    // binary). Such a host gets a silent skip under `optional`; name the paths in
+    // `[mounts]` until this grows an any-of primary.
+    //
+    // `~/.dub` is the `$HOME` half, and always read-write: it holds both the fetched
+    // package store and the build cache, and dub cannot resolve, fetch or build against a
+    // read-only one — the same "a ro cache is breakage, not protection" as cargo's
+    // registry. Note it goes further than cargo's: `~/.dub/cache` holds *linked
+    // executables*, so a sandbox writes artifacts a later host-side `dub run` will execute.
+    // That is the trust `~/.npm/_npx` already carries, in its sharpest form, and it is what
+    // `mode = "overlay"` is for once that exists. Nothing here is key material — dub
+    // publishes off git tags and keeps no local token, so unlike `~/.cargo` the whole
+    // directory can come along.
+    Recipe {
+        name: "dlang",
+        primary: "/etc/dmd.conf",
+        // `~/.dmd.conf` and `~/.ldc/ldc2.conf` are the user's own overrides of the above,
+        // and `~/dlang` is where install.sh puts whole toolchains — all three are the
+        // user's tree, so they ride the chosen mode.
+        install: &["~/.dmd.conf", "~/.ldc", "~/dlang"],
+        system: &["/etc/dmd.conf", "/etc/ldc2.conf", "/etc/ldc", "/var/lib/dub"],
+        cache: &["~/.dub"],
+    },
 ];
 
 fn recipe(name: &str) -> Option<&'static Recipe> {
@@ -603,8 +656,9 @@ pub(crate) fn resolve_specs(
 /// Append the mounts for every enabled toolchain. Same tier as `[mounts]`, so it rides
 /// the same dedupe/sort and an explicit `--ro`/`--rw` still wins.
 ///
-/// No `base`: every recipe path is `~`-anchored, so there is no relative path here for a
-/// project file's directory to mean anything to.
+/// No `base`: every recipe path is either `~`-anchored or absolute (`dlang`'s `/etc`
+/// config), so there is no relative path here for a project file's directory to mean
+/// anything to.
 fn resolve_toolchains(
     toolchains: &HashMap<String, ToolchainSpec>,
     mounts: &mut Vec<Mount>,
@@ -653,6 +707,15 @@ fn resolve_toolchains(
             let path = expand(raw)?;
             if path.exists() {
                 mounts.push(mount(mode, mounts::canonicalize(&path)?));
+            }
+        }
+        // Read-only whatever the mode: see `Recipe::system`. Pushed before `cache` for the
+        // same reason the whole list is ordered least-to-most explicit — nothing here
+        // overlaps a cache path today, and if one ever did the writable side should win.
+        for raw in r.system {
+            let path = expand(raw)?;
+            if path.exists() {
+                mounts.push(Mount::ro(mounts::canonicalize(&path)?));
             }
         }
         for raw in r.cache {
@@ -750,6 +813,32 @@ mod tests {
             assert_ne!(*p, "~/.cargo", "mounting the cargo home brings credentials.toml in");
             assert!(!p.contains("credentials"), "{p} is key material");
         }
+    }
+
+    /// `system` is the "read-only whatever the mode" list, and two things hold it up: the
+    /// paths are outside `$HOME` (so `rw`, which is about the user's own toolchain tree,
+    /// has no business reaching them), and none is *also* in `install`, which would mount
+    /// it a second time at the chosen mode. The second mount would not even be visible as
+    /// a conflict — `dedupe` is last-wins and the two loops could be reordered by someone
+    /// with no reason to suspect the order was load-bearing.
+    #[test]
+    fn system_paths_are_outside_home_and_never_remounted() {
+        for r in RECIPES {
+            for p in r.system {
+                assert!(p.starts_with('/'), "{}: `{p}` is not an absolute system path", r.name);
+                assert!(!r.install.contains(p), "{}: `{p}` is in install too — rw wins", r.name);
+                assert!(!r.cache.contains(p), "{}: `{p}` is in cache too — rw wins", r.name);
+            }
+        }
+    }
+
+    /// The `dlang` recipe is the first with absolute paths in it, so resolving it exercises
+    /// `expand` on something that is not `~`-anchored. Present or absent on the test
+    /// machine, the answer is `Ok` — same contract as the rust case above.
+    #[test]
+    fn optional_dlang_resolves_either_way() {
+        let c = parse_str("[toolchains]\ndlang = { mode = \"rw\", optional = true }\n");
+        assert!(c.resolve().is_ok(), "optional toolchain must resolve on any host");
     }
 
     /// Resolving an optional toolchain must not depend on what the test machine has
