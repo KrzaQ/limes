@@ -66,13 +66,41 @@ pub(crate) fn tri(yes: bool, no: bool) -> Option<bool> {
     }
 }
 
-/// Where the rosa broker listens: `$ROSA_SOCK`, else `rosa.sock` in the runtime dir.
-/// `Context::detect` already resolved `XDG_RUNTIME_DIR` (falling back to `/run/user/$uid`),
-/// so this needs no path logic of its own.
+/// Where the rosa broker listens — asked of `rosa` itself rather than re-derived.
+///
+/// rosa 0.2.0 moved the socket out of `$XDG_RUNTIME_DIR` (absent under WSL, in containers
+/// and under cron, where `serve` then failed outright) to sit beside its store, and added
+/// `rosa sock` so tooling need not track the rule. limes had that rule copied, and a copy
+/// of a rule is exactly what goes stale: after the move it looked in the runtime dir, found
+/// nothing, and — since `rosa_mounts` treats a missing socket as "no agent running" —
+/// forwarded nothing at all, silently. Asking the binary cannot drift.
+///
+/// `find_in_path` rather than `rosa_client`, which filters out `/usr` because nothing there
+/// needs mounting; a rosa installed by the package manager still answers this question.
 pub fn rosa_socket(ctx: &Context) -> PathBuf {
+    if let Some(p) = ask_rosa_sock() {
+        return p;
+    }
+    // A rosa too old to know the subcommand, or none installed at all — `doctor` still
+    // wants a path to name. Mirrors rosa's own resolution order.
     std::env::var_os("ROSA_SOCK")
         .map(PathBuf::from)
-        .unwrap_or_else(|| ctx.xdg_runtime_dir.join("rosa.sock"))
+        .unwrap_or_else(|| rosa_config_dir(ctx).join("rosa.sock"))
+}
+
+/// `rosa sock`, or `None` if rosa cannot be asked. Same shape as `gpgconf_dir` below.
+fn ask_rosa_sock() -> Option<PathBuf> {
+    let out = Command::new(find_in_path("rosa")?).arg("sock").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if p.is_empty() { None } else { Some(PathBuf::from(p)) }
+}
+
+/// rosa's config directory, which is also where it keeps `secrets.json.gpg` by default.
+fn rosa_config_dir(ctx: &Context) -> PathBuf {
+    ctx.xdg_config_home().join("rosa")
 }
 
 /// The rosa client binary, if it is somewhere the `/usr` mirror won't already supply.

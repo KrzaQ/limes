@@ -184,6 +184,11 @@ precedence chain above; only forwards whose destination differs from their sourc
 docker) build raw `-v` args. Each forward no-ops silently when its target is absent, which
 is what makes on-by-default safe.
 
+`rosa_socket` **asks `rosa sock`** rather than deriving the path. limes used to carry a
+copy of rosa's rule, and when rosa moved the socket out of `$XDG_RUNTIME_DIR` the copy went
+stale — a missing socket reads as "no agent running", so the forward silently disappeared
+rather than failing. Any other tool's path that tool can print is worth asking for.
+
 **Nesting vs. collision** are different mechanisms: exact-path duplicates are resolved by
 `dedupe`; *nested* paths (`--ro ~/code --rw ~/code/project`) are two separate mounts that
 Docker layers, which is why depth-sorting matters.

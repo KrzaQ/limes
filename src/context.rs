@@ -128,12 +128,17 @@ impl Context {
         self.home.join(".local/share/limes/bin/dockerd-rootless.sh")
     }
 
-    /// `~/.config/limes` (honoring `$XDG_CONFIG_HOME`).
-    fn config_dir(&self) -> PathBuf {
+    /// `~/.config` (honoring `$XDG_CONFIG_HOME`). Public because `forward` resolves
+    /// *another* tool's config dir under it — rosa keeps its store there.
+    pub fn xdg_config_home(&self) -> PathBuf {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join(".config"))
-            .join("limes")
+    }
+
+    /// `~/.config/limes` (honoring `$XDG_CONFIG_HOME`).
+    fn config_dir(&self) -> PathBuf {
+        self.xdg_config_home().join("limes")
     }
 
     /// `~/.local/share/limes` (honoring `$XDG_DATA_HOME`).
