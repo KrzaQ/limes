@@ -388,12 +388,12 @@ fn build_spec(ctx: &Context, args: &RunArgs) -> Result<(RunSpec, Vec<String>)> {
     // `.limes.local.toml` refuses the run, before anything has been created.
     let local = local_mounts(ctx, args, &workspace)?;
 
-    // Auto-detected agents (program files ro, state dirs rw), plus rosa's socket and
-    // client binary — both same-path, so they ride the normal precedence chain rather
-    // than being bolted on as raw binds the way ssh/gpg have to be.
+    // Auto-detected agents (program files ro, state dirs rw), plus rosa's socket, client
+    // binary and the shadow over its store — all same-path, so they ride the normal
+    // precedence chain rather than being bolted on as raw binds the way ssh/gpg have to be.
     let detected = agents::detect(ctx, args);
     let mut extra = detected.mounts.clone();
-    extra.extend(forward::rosa_mounts(ctx, forwards.rosa));
+    extra.extend(forward::rosa_mounts(ctx, forwards.rosa)?);
 
     // The generated system gitconfig, which stops git rebuilding its index on every run
     // inside — see `identity::SYSTEM_GITCONFIG` for why uid 0 causes that. Resolved the
@@ -1126,6 +1126,32 @@ mod tests {
         let mut m = vec![Mount::hide("/a".into(), 0o700), Mount::ro("/a".into())];
         dedupe(&mut m);
         assert_eq!(m, vec![Mount::ro("/a".into())], "and is itself overridable");
+    }
+
+    /// The arrangement `forward::rosa_mounts` depends on, spelled out because two separate
+    /// mechanisms have to hold at once and neither is obvious from its own call site.
+    ///
+    /// A config mounting `~/.config` read-only sits at a *later* tier than limes' built-in
+    /// hide of `~/.config/rosa` — so if the two collided, the store would win and be
+    /// readable inside. They do not collide: `dedupe` is exact-path, and these nest. And
+    /// the socket then has to survive its own parent being shadowed, which is only true
+    /// because `sort_for_nesting` puts the deeper bind after the tmpfs.
+    ///
+    /// Break either half and the failure is silent in the dangerous direction — a sandbox
+    /// that can read the encrypted store, or one whose broker socket vanished.
+    #[test]
+    fn the_rosa_store_hide_survives_a_config_that_mounts_config_home() {
+        let cfg = Mount::ro("/home/u/.config".into());
+        let hide = Mount::hide("/home/u/.config/rosa".into(), 0o700);
+        let sock = Mount::rw("/home/u/.config/rosa/rosa.sock".into());
+
+        // Built-in tier first, config after it — the order `run` pushes them in.
+        let mut m = vec![hide.clone(), sock.clone(), cfg.clone()];
+        dedupe(&mut m);
+        assert_eq!(m.len(), 3, "nested paths are not collisions; nothing may be collapsed");
+
+        mounts::sort_for_nesting(&mut m);
+        assert_eq!(m, vec![cfg, hide, sock], "shallowest first: bind, shadow, then socket");
     }
 
     /// The case this warning exists for, and the one that produced it: a machine-wide

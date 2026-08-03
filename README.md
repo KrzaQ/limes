@@ -61,8 +61,9 @@ If you need to contain a hostile process, use a VM, not this.
 - **Brokers secrets through [sub rosa](https://github.com/KrzaQ/sub-rosa)**: if `rosa` is
   on your `PATH` and its agent is running, the socket and client are mounted in, so a
   sandboxed process can *request* a secret and you approve it on rosa's own tty — a channel
-  the sandbox cannot reach. The encrypted store lives in `$HOME`, which the tmpfs shadows,
-  so it is never readable from inside.
+  the sandbox cannot reach. `~/.config/rosa` — the encrypted store, beside the socket — is
+  shadowed inside, so no config mounting `~/.config` can leak it; the socket still lands on
+  top. Point rosa's `store` outside that directory and hiding it is back on you.
 - **Dedicated rootless daemon** with its own data-root, so `lim prune` can only ever
   remove limes's own containers/images/volumes — never anything on your system daemon.
 - **Sets `LIMES_VERSION`** inside the sandbox — presence tells a shell/script it's running

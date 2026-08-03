@@ -14,10 +14,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anyhow::Result;
+
 use crate::RunArgs;
 use crate::config;
 use crate::context::Context;
-use crate::mounts::{Bind, Mount};
+use crate::mounts::{self, Bind, Mount};
 use crate::util::find_in_path;
 
 /// Which forwards are live for this run.
@@ -112,28 +114,44 @@ pub fn rosa_client() -> Option<PathBuf> {
     find_in_path("rosa").filter(|p| !p.starts_with("/usr"))
 }
 
-/// Same-path mounts rosa needs: the broker socket and (when it isn't already covered by
-/// the `/usr` mirror) the client binary.
+/// The mounts rosa needs: a shadow over its store directory, then the broker socket and
+/// (when it isn't already covered by the `/usr` mirror) the client binary.
 ///
 /// These go through the normal `Mount` list rather than raw `-v` args so they inherit
 /// dedupe, depth-sorting and the usual precedence — an explicit `--ro`/`--rw` on either
-/// path still wins. The encrypted store is *not* here and must never be: it lives in
-/// `$HOME`, which the tmpfs shadows, so the sandbox can request secrets but never read
-/// them at rest.
-pub fn rosa_mounts(ctx: &Context, on: bool) -> Vec<Mount> {
+/// path still wins.
+///
+/// **The store must never be readable from inside**, or the approval gate is decoration:
+/// anything in the sandbox could copy it out and decrypt it against the gpg agent limes
+/// also forwards, without asking anyone. That used to need no code — the store lived in
+/// `$HOME` and the tmpfs shadowed it. Then rosa moved its socket beside the store, and the
+/// two now share `~/.config/rosa`: any config that mounts `~/.config` (a normal thing to
+/// want — it is where every tool's settings live) hands over the store as a side effect,
+/// and nothing says so. So limes shadows the directory itself and lets the socket bind land
+/// back on top of it, which depth-sorting already guarantees.
+///
+/// Deliberately **not** gated on `on`: `--no-rosa` means "do not forward the broker", never
+/// "expose the store". Deliberately a hide of the whole directory rather than of the store
+/// file, because rosa's `store` key can rename it and limes cannot read that. A custom
+/// `store` pointing *outside* this directory is therefore not covered — hide it yourself.
+/// `resolve_hide` no-ops on a path that isn't there, so a host without rosa pays nothing.
+pub fn rosa_mounts(ctx: &Context, on: bool) -> Result<Vec<Mount>> {
     let mut m = Vec::new();
+    if let Some((dir, mode)) = mounts::resolve_hide(&rosa_config_dir(ctx))? {
+        m.push(Mount::hide(dir, mode));
+    }
     if !on {
-        return m;
+        return Ok(m);
     }
     let sock = rosa_socket(ctx);
     if !sock.exists() {
-        return m; // `rosa serve` isn't running — nothing to forward.
+        return Ok(m); // `rosa serve` isn't running — nothing to forward.
     }
     m.push(Mount::rw(sock));
     if let Some(bin) = rosa_client() {
         m.push(Mount::ro(bin));
     }
-    m
+    Ok(m)
 }
 
 /// Every enabled forward's non-`Mount` pieces: the sockets whose destination differs from

@@ -76,10 +76,12 @@ These are load-bearing; breaking one silently defeats the tool.
   what guards it, and a Fail there means real root.
 - **Credentials are forwarded as oracles, never as key material**: the SSH agent socket, the
   GPG *extra* (restricted) socket, the rosa broker socket, `~/.gitconfig` ro. Don't mount
-  `~/.ssh`, `~/.gnupg`, or rosa's encrypted store (`~/.secrets.json.gpg`, named by
-  `~/.config/rosa/config.toml`) — the store staying invisible depends only on `$HOME` being
-  tmpfs, so any mount that reaches into `$HOME` risks undoing it. Note `agents.rs`
-  deliberately never mounts `~/.local` wholesale for the same reason.
+  `~/.ssh` or `~/.gnupg` — the tmpfs `$HOME` is the only thing keeping them out, so any
+  mount that reaches into `$HOME` risks undoing it. Note `agents.rs` deliberately never
+  mounts `~/.local` wholesale for the same reason. rosa's encrypted store
+  (`~/.config/rosa/secrets.json.gpg`) is the exception that got a mechanism instead of a
+  rule: since rosa put its socket beside the store, `forward::rosa_mounts` shadows
+  `~/.config/rosa` outright rather than trusting nobody to mount `~/.config`.
 - **A mount path that doesn't exist on the host is a hard error**, not a silently-created
   empty dir. The only exception is config's `optional = true`.
 - **A project file is policy the sandbox can write, so it is gated.** `.limes.local.toml`
@@ -179,10 +181,12 @@ nothing, and that module's "oracle, never key material" framing is worth keeping
 resolves each one **built-in default (on) → config `[forward]` → CLI flag**, mirroring how
 mounts layer. The paired `--gpg`/`--no-gpg` flags exist so the CLI can beat config in
 *both* directions; they rely on clap `overrides_with` for last-one-wins. Anything
-same-path (rosa's socket and client binary) is expressed as a `Mount` so it inherits the
-precedence chain above; only forwards whose destination differs from their source (gpg,
-docker) build raw `-v` args. Each forward no-ops silently when its target is absent, which
-is what makes on-by-default safe.
+same-path (rosa's socket, client binary and store shadow) is expressed as a `Mount` so it
+inherits the precedence chain above; only forwards whose destination differs from their
+source (gpg, docker) build raw `-v` args. Each forward no-ops silently when its target is
+absent, which is what makes on-by-default safe — with one deliberate exception: rosa's
+store shadow is emitted even under `--no-rosa`, since declining to forward the broker is
+not a request to expose the secrets.
 
 `rosa_socket` **asks `rosa sock`** rather than deriving the path. limes used to carry a
 copy of rosa's rule, and when rosa moved the socket out of `$XDG_RUNTIME_DIR` the copy went
